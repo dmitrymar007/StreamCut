@@ -268,6 +268,9 @@ class ModelsDialog(QDialog):
             self.progress.setRange(0, 100)
             self.progress.setValue(100 if event["kind"] == "done" else 0)
 
+    def reject(self):
+        self.close()
+
     def closeEvent(self, event):
         if self.lookup and self.lookup.isRunning():
             self.output.appendPlainText("Завершается проверка соединения; окно можно будет закрыть через несколько секунд")

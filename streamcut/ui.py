@@ -1003,6 +1003,7 @@ class MainWindow(QMainWindow):
             self.project.settings.pop("visual_end", None)
             self.remember_settings()
             self.save()
+        dialog.deleteLater()
 
     def models(self):
         if self.worker.running():
@@ -1011,6 +1012,7 @@ class MainWindow(QMainWindow):
         dialog.exec()
         self.remember_settings()
         self.save()
+        dialog.deleteLater()
 
     def remember_settings(self):
         values = {key: self.project.settings.get(key, value) for key, value in default_settings().items()}
@@ -1027,13 +1029,16 @@ class MainWindow(QMainWindow):
         snapshot = folder / "analysis.json"
         snapshot.write_text(self.project.model_dump_json(), encoding="utf-8")
         self.worker.start(["analyze", str(snapshot), "--folder", str(folder)])
-        self.analyze_button.setEnabled(False)
-        self.pause_button.setEnabled(True)
+        self.analyze_button.setEnabled(not self.worker.running())
+        self.pause_button.setEnabled(self.worker.running())
 
     def analyze_selection(self):
         clip = self.current()
         if clip:
             if self.worker.running():
+                return
+            if not self.source_valid or not self.store:
+                self.error("Переподключите исходник перед анализом выделения")
                 return
             self.selection_overrides = {"visual_start": clip.start, "visual_end": clip.end, "transcribe": False,
                                         "text_search": False, "visual": "подробный"}
@@ -1133,6 +1138,8 @@ class MainWindow(QMainWindow):
             image.setPixmap(QPixmap(str(path)).scaled(640, 360, Qt.AspectRatioMode.KeepAspectRatio))
             layout.addWidget(image)
         dialog.exec()
+
+        dialog.deleteLater()
 
     def cache_dialog(self):
         if not self.store:
@@ -1269,6 +1276,7 @@ class MainWindow(QMainWindow):
         dialog.finished.connect(lambda _: player.terminate())
         player.play(path)
         dialog.exec()
+        dialog.deleteLater()
 
     def update_queue(self):
         jobs = self.project.jobs
@@ -1327,6 +1335,8 @@ class MainWindow(QMainWindow):
         timer.timeout.connect(refresh)
         timer.start(1000)
         dialog.exec()
+        timer.stop()
+        dialog.deleteLater()
 
     def export_preview(self):
         if self.store and self.current():
