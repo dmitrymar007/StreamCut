@@ -8,7 +8,7 @@ import sys
 import threading
 from pathlib import Path
 
-from .domain import ExportJob, Segment, fingerprint, timecode
+from .domain import ExportJob, Segment, fingerprint, parse_time, timecode
 
 ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
 VENDOR = ROOT / "vendor"
@@ -39,7 +39,18 @@ def probe(path: str) -> dict:
         raise ValueError("В файле не обнаружена видеодорожка")
     num, den = video.get("avg_frame_rate", "25/1").split("/")
     fps = float(num) / max(float(den), 1)
-    return {"duration": float(data["format"].get("duration", video.get("duration", 0))),
+    origin = float(data["format"].get("start_time", 0))
+    durations = []
+    for stream in data["streams"]:
+        if stream["codec_type"] not in ("audio", "video"):
+            continue
+        if stream.get("duration") not in (None, "N/A"):
+            durations.append(float(stream.get("start_time", origin))-origin+float(stream["duration"]))
+        elif stream.get("tags", {}).get("DURATION"):
+            # Matroska's DURATION tag is an end timestamp and includes muxed timestamp offsets.
+            durations.append(parse_time(stream["tags"]["DURATION"])-origin)
+    duration = max(durations) if durations else float(data["format"].get("duration", 0))
+    return {"duration": duration, "source_start": origin,
             "width": video["width"], "height": video["height"], "fps": fps or 25,
             "audio_tracks": [{"index": s["index"], "label": s.get("tags", {}).get("title", ""),
                               "language": s.get("tags", {}).get("language", "und")}
@@ -72,7 +83,7 @@ def subtitles(segments: list[Segment], start: float, end: float) -> str:
 
 def video_filter(options) -> str:
     h = options.height
-    if options.layout == "9:16":
+    if options.layout in ("9:16", "размытый фон", "вебкамера + игра"):
         w = round(h * 9 / 16 / 2) * 2
     elif options.layout == "1:1":
         w = h
@@ -84,6 +95,15 @@ def video_filter(options) -> str:
         return (f"split=2[bg][fg];[bg]scale={w}:{h}:force_original_aspect_ratio=increase,"
                 f"crop={w}:{h},boxblur=20:2[back];[fg]scale={w}:{h}:"
                 f"force_original_aspect_ratio=decrease[front];[back][front]overlay=(W-w)/2:(H-h)/2")
+    if options.layout == "вебкамера + игра":
+        top = round(h/3/2)*2
+        bottom = h-top
+        return (f"split=2[cam][game];[cam]crop=trunc(iw*{options.webcam_w}/2)*2:"
+                f"trunc(ih*{options.webcam_h}/2)*2:(iw-ow)*{options.webcam_x}:(ih-oh)*{options.webcam_y},"
+                f"scale={w}:{top}:force_original_aspect_ratio=increase,crop={w}:{top}[c];"
+                f"[game]scale={w}:{bottom}:force_original_aspect_ratio=increase,"
+                f"crop={w}:{bottom}:(iw-ow)*{options.crop_x}:(ih-oh)*{options.crop_y}[g];"
+                "[c][g]vstack=inputs=2,setsar=1")
     return (f"scale={w}:{h}:force_original_aspect_ratio=increase,"
             f"crop={w}:{h}:(iw-ow)*{options.crop_x}:(ih-oh)*{options.crop_y},setsar=1")
 

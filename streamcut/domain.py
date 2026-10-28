@@ -53,12 +53,13 @@ class Segment(Span):
     text: str
     words: list[dict] = Field(default_factory=list)
     approximate: bool = True
+    edited: bool = False
 
 
 class Clip(BaseModel):
     id: str = Field(default_factory=uid)
     title: str = "Новый момент"
-    spans: list[Span]
+    spans: list[Span] = Field(min_length=1)
     reason: str = "Добавлен вручную"
     evidence: list[str] = Field(default_factory=list)
     sources: list[str] = Field(default_factory=lambda: ["вручную"])
@@ -91,6 +92,10 @@ class ExportOptions(BaseModel):
     fade: float = Field(default=0.1, ge=0, le=2)
     subtitles: bool = False
     sidecar: bool = True
+    webcam_x: float = Field(default=0, ge=0, le=1)
+    webcam_y: float = Field(default=0, ge=0, le=1)
+    webcam_w: float = Field(default=0.3, ge=0.05, le=1)
+    webcam_h: float = Field(default=0.3, ge=0.05, le=1)
 
 
 class ExportJob(BaseModel):
@@ -113,8 +118,9 @@ class Project(BaseModel):
     title: str = "Новый проект"
     source: str = ""
     fingerprint: str = ""
-    duration: float = 0
-    fps: float = 25
+    source_start: float = 0
+    duration: float = Field(default=0, ge=0, allow_inf_nan=False)
+    fps: float = Field(default=25, gt=0, allow_inf_nan=False)
     width: int = 1920
     height: int = 1080
     audio_tracks: list[dict] = Field(default_factory=list)
@@ -123,6 +129,7 @@ class Project(BaseModel):
     segments: list[Segment] = Field(default_factory=list)
     checkpoints: dict[str, list[str]] = Field(default_factory=dict)
     coverage: list[Span] = Field(default_factory=list)
+    visual_evidence: list[dict] = Field(default_factory=list)
     jobs: list[ExportJob] = Field(default_factory=list)
     settings: dict = Field(default_factory=dict)
 

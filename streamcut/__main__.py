@@ -24,7 +24,10 @@ def main():
     window.show()
     if len(sys.argv) > 1:
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(100, lambda: window.open_source(sys.argv[1]))
+        if sys.argv[1] == "--project" and len(sys.argv) > 2:
+            QTimer.singleShot(100, lambda: window.open_project(sys.argv[2]))
+        else:
+            QTimer.singleShot(100, lambda: window.open_source(sys.argv[1]))
     sys.exit(app.exec())
 
 

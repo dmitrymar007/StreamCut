@@ -83,12 +83,12 @@ def fixture_video(tmp_path_factory):
     return path
 
 
-@pytest.mark.parametrize("layout", ["исходный", "9:16", "1:1", "размытый фон"])
+@pytest.mark.parametrize("layout", ["исходный", "9:16", "1:1", "размытый фон", "вебкамера + игра"])
 def test_real_export(fixture_video, tmp_path, layout):
     output = tmp_path / f"Клип {layout.replace(':','-')}.mp4"
     job = ExportJob(clip=Clip(spans=[Span(start=1.24, end=3.64)]), source=str(fixture_video),
                     fingerprint=fingerprint(fixture_video), destination=str(output),
-                    options=ExportOptions(layout=layout, height=480),
+                    options=ExportOptions(layout=layout, height=480, subtitles=True),
                     segments=[Segment(start=1.3, end=3.3, text="Русская речь")])
     export_clip(job, threading.Event(), lambda p: None)
     meta = probe(str(output))
@@ -140,3 +140,85 @@ def test_ollama_invalid_ids_retry(monkeypatch):
     with pytest.raises(ValueError, match="после повтора"):
         Ollama().search("model", [{"id": "valid", "text": "hello"}], "criteria")
     assert len(count) == 2
+
+
+def test_low_disk_no_output(fixture_video, tmp_path, monkeypatch):
+    import shutil
+    from collections import namedtuple
+    usage = namedtuple("usage", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: usage(100, 99, 1))
+    target = tmp_path / "Не должен появиться.mp4"
+    job = ExportJob(clip=Clip(spans=[Span(start=0, end=2)]), source=str(fixture_video),
+                    fingerprint=fingerprint(fixture_video), destination=str(target), options=ExportOptions())
+    with pytest.raises(OSError, match="места"):
+        export_clip(job, threading.Event(), lambda p: None)
+    assert not target.exists()
+
+
+def test_nonzero_start_and_second_audio(fixture_video, tmp_path):
+    source = tmp_path / "Две дорожки.mkv"
+    run([executable("ffmpeg"), "-y", "-i", str(fixture_video), "-f", "lavfi", "-i",
+         "sine=frequency=880:sample_rate=48000:duration=6",
+         "-map", "0:v", "-map", "0:a", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-output_ts_offset", "5", str(source)])
+    source_meta = probe(str(source))
+    assert 5.9 < source_meta["duration"] < 6.15
+    assert source_meta["source_start"] > 4.9
+    target = tmp_path / "Выбранный звук.mp4"
+    job = ExportJob(clip=Clip(spans=[Span(start=1.24, end=3.64)]), source=str(source), audio=1,
+                    fingerprint=fingerprint(source), destination=str(target), options=ExportOptions(height=480))
+    export_clip(job, threading.Event(), lambda p: None)
+    meta = probe(str(target))
+    assert abs(meta["duration"]-2.4) < 0.15
+    assert len(meta["audio_tracks"]) == 1
+    import wave
+
+    import numpy as np
+
+    from streamcut.media import extract_audio
+    audio = tmp_path / "Частота.wav"
+    extract_audio(str(target), 0, 0.5, 1, audio)
+    with wave.open(str(audio)) as wav:
+        samples = np.frombuffer(wav.readframes(wav.getnframes()), dtype=np.int16)
+    peak_hz = np.argmax(np.abs(np.fft.rfft(samples)))*16000/len(samples)
+    assert abs(peak_hz-880) < 3
+
+
+def test_whisper_decoder_compatible(fixture_video):
+    from faster_whisper.audio import decode_audio
+    result = decode_audio(str(fixture_video))
+    assert 5.9 < len(result)/16000 < 6.1
+
+
+def test_visual_coverage_and_resume(fixture_video, tmp_path, monkeypatch, capsys):
+    from streamcut import worker
+    from streamcut.ollama import VisualProposals
+    calls = []
+    class LocalModel:
+        def __init__(self, *args):
+            pass
+        def show(self, model):
+            return {"capabilities": ["vision"]}
+        def revision(self, model):
+            return "tested-revision"
+        def search(self, model, records, *args):
+            calls.append(records)
+            return VisualProposals(moments=[])
+        def release(self, model):
+            pass
+    monkeypatch.setattr(worker, "Ollama", LocalModel)
+    folder = tmp_path/"cache"
+    folder.mkdir()
+    snapshot = folder/"analysis.json"
+    project = Project(source=str(fixture_video), duration=6, fingerprint=fingerprint(fixture_video),
+                      settings={"transcribe": False, "text_search": False, "visual": "подробный",
+                                "frame_interval": 1, "criteria": "видимые события"})
+    snapshot.write_text(project.model_dump_json(), encoding="utf-8")
+    worker.analyze(snapshot, folder)
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    visual = [e for e in events if e["kind"] == "visual"]
+    assert [t for e in visual for t in e["samples"]] == [0, 1, 2, 3, 4, 5]
+    assert len(calls) == 2
+    project.checkpoints["analysis"] = [e["checkpoint"] for e in visual]
+    snapshot.write_text(project.model_dump_json(), encoding="utf-8")
+    worker.analyze(snapshot, folder)
+    assert len(calls) == 2

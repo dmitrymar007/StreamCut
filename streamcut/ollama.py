@@ -17,6 +17,14 @@ class Proposals(BaseModel):
     moments: list[Proposal]
 
 
+class VisualProposal(Proposal):
+    observation: str = Field(min_length=1, description="Что непосредственно видно на кадрах; без домыслов по речи")
+
+
+class VisualProposals(BaseModel):
+    moments: list[VisualProposal]
+
+
 class Ollama:
     def __init__(self, url="http://127.0.0.1:11434"):
         self.url = url.rstrip("/")
@@ -33,10 +41,23 @@ class Ollama:
             r.raise_for_status()
             return r.json()
 
+    def revision(self, model):
+        names = {model, model if ":" in model else model+":latest"}
+        return next((m.get("digest", "unknown") for m in self.models() if m["name"] in names), "unknown")
+
     def release(self, model):
         with httpx.Client(timeout=20, trust_env=False) as c:
             r = c.post(self.url + "/api/generate", json={"model": model, "keep_alive": 0})
             r.raise_for_status()
+
+    def describe(self, model, image):
+        with httpx.Client(timeout=httpx.Timeout(600, connect=10), trust_env=False) as c:
+            r = c.post(self.url+"/api/chat", json={"model": model, "stream": False, "think": False,
+                "keep_alive": "1m", "options": {"num_ctx": 4096, "num_predict": 350, "num_thread": 4},
+                "messages": [{"role": "user", "content": "Кратко опиши на русском, что видно на кадре. Не выдумывай события за пределами изображения.",
+                              "images": [base64.b64encode(image.read_bytes()).decode()]}]})
+            r.raise_for_status()
+            return r.json()["message"]["content"]
 
     def search(self, model, records, criteria, images=None, threads=4):
         system = ("Ты редактор русскоязычного стрима. Ищи законченные интересные события по критериям. "
@@ -49,8 +70,13 @@ class Ollama:
                                                         ensure_ascii=False)}
         if images:
             user["images"] = [base64.b64encode(p.read_bytes()).decode() for p in images]
+            system += (" Это ВИЗУАЛЬНОЕ обнаружение. Событие должно подтверждаться самими изображениями. "
+                       "Речь — только контекст. Не предлагай реплику как визуальное событие. "
+                       "Для обычной статичной сцены верни пустой moments. "
+                       "В observation опиши непосредственно видимое свидетельство и изменение между кадрами, если оно видно.")
+        response_type = VisualProposals if images else Proposals
         payload = {"model": model, "messages": [{"role": "system", "content": system}, user],
-                   "format": Proposals.model_json_schema(), "stream": False,
+                   "format": response_type.model_json_schema(), "stream": False,
                    "options": {"num_ctx": 8192, "num_predict": 1800, "num_thread": threads,
                                "temperature": 0.2}, "keep_alive": "2m", "think": False}
         error = None
@@ -59,7 +85,7 @@ class Ollama:
                 with httpx.Client(timeout=httpx.Timeout(900, connect=10), trust_env=False) as c:
                     r = c.post(self.url + "/api/chat", json=payload)
                     r.raise_for_status()
-                    result = Proposals.model_validate_json(r.json()["message"]["content"])
+                    result = response_type.model_validate_json(r.json()["message"]["content"])
                 ids = [record["id"] for record in records]
                 for proposal in result.moments:
                     if proposal.first_id not in ids or proposal.last_id not in ids:

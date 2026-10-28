@@ -20,18 +20,24 @@ class WorkerProcess(QObject):
         self.process.readyReadStandardOutput.connect(self.read)
         self.process.readyReadStandardError.connect(self.read_error)
         self.process.finished.connect(self.end)
-        self.process.errorOccurred.connect(lambda e: self.event.emit(
-            {"kind": "error", "text": self.process.errorString()}) if e == QProcess.ProcessError.FailedToStart else None)
+        self.process.errorOccurred.connect(self.process_error)
         self.buffer = b""
         self.stderr = ""
         self.had_terminal = False
+
+    def process_error(self, error):
+        if error == QProcess.ProcessError.FailedToStart:
+            self.had_terminal = True
+            self.event.emit({"kind": "error", "text": self.process.errorString()})
+            self.finished.emit()
 
     def start(self, args):
         self.buffer = b""
         self.stderr = ""
         self.had_terminal = False
         if getattr(sys, "frozen", False):
-            self.process.start(sys.executable, ["--worker", *args])
+            helper = str(Path(sys.executable).with_name("StreamCut-worker.exe"))
+            self.process.start(helper, ["--worker", *args])
         else:
             self.process.start(sys.executable, ["-u", "-m", "streamcut.worker", *args])
 
@@ -82,6 +88,21 @@ class ExportThread(QThread):
             self.result.emit(self.job.id, "отменён", str(exc))
         except Exception as exc:
             self.result.emit(self.job.id, "ошибка экспорта", str(exc))
+
+
+class FunctionThread(QThread):
+    result = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, function, parent=None):
+        super().__init__(parent)
+        self.function = function
+
+    def run(self):
+        try:
+            self.result.emit(self.function())
+        except Exception as exc:
+            self.error.emit(str(exc))
 
 
 class PreviewThread(QThread):

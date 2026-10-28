@@ -5,7 +5,7 @@ import os
 import re
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QStringListModel, Qt, QTimer, QUrl
+from PySide6.QtCore import QLockFile, QSettings, QStringListModel, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -90,12 +90,14 @@ class MainWindow(QMainWindow):
         except (ValueError, TypeError):
             pass
         self.store = None
+        self.project_lock = None
         self.selected = None
         self.player = None
         self.player_error = ""
         self.export_thread = None
         self.preview_thread = None
         self.position = 0.0
+        self.pending_seek = None
         self.undo_stack, self.redo_stack = [], []
         self.loading = False
         self.source_valid = False
@@ -112,6 +114,8 @@ class MainWindow(QMainWindow):
         sizes = self.preferences.value("panels")
         if sizes:
             self.splitter.restoreState(sizes)
+        available = QApplication.primaryScreen().availableGeometry()
+        self.resize(min(self.width(), available.width()-20), min(self.height(), available.height()-50))
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(100)
@@ -210,7 +214,7 @@ class MainWindow(QMainWindow):
         cl.setContentsMargins(0, 0, 0, 0)
         self.video = QFrame()
         self.video.setStyleSheet("background: #080b11; border-radius: 9px;")
-        self.video.setMinimumSize(320, 200)
+        self.video.setMinimumSize(320, 140)
         self.video.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
         self.video.winId()
         video_layout = QVBoxLayout(self.video)
@@ -252,6 +256,8 @@ class MainWindow(QMainWindow):
         self.transcript = QListView()
         self.transcript.setModel(self.transcript_model)
         self.transcript.setEditTriggers(QListView.EditTrigger.NoEditTriggers)
+        self.transcript.setMinimumHeight(50)
+        self.transcript.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.transcript.clicked.connect(self.seek_segment)
         self.transcript.doubleClicked.connect(self.edit_segment)
         tl.addWidget(self.transcript)
@@ -261,7 +267,7 @@ class MainWindow(QMainWindow):
         label.setObjectName("muted")
         transcript_buttons.addWidget(label)
         tl.addLayout(transcript_buttons)
-        self.transcript_panel.setMinimumHeight(120)
+        self.transcript_panel.setMinimumHeight(190)
         self.transcript_panel.setMaximumHeight(240)
         cl.addWidget(self.transcript_panel, 2)
         self.splitter.addWidget(center)
@@ -299,15 +305,17 @@ class MainWindow(QMainWindow):
         il.addWidget(self.note)
         self.options = ExportOptions()
         export_form = QFormLayout()
+        self.export_form = export_form
         self.layout_choice = QComboBox()
-        self.layout_choice.addItems(["исходный", "9:16", "16:9", "1:1", "размытый фон"])
+        self.layout_choice.addItems(["исходный", "9:16", "16:9", "1:1", "размытый фон", "вебкамера + игра"])
         export_form.addRow("Кадр", self.layout_choice)
         self.export_mode = QComboBox()
         self.export_mode.addItems(["точный", "быстрый"])
         self.export_mode.setToolTip("Быстрое копирование зависит от ключевых кадров; границы приблизительные. Без фильтров звука.")
         export_form.addRow("Экспорт", self.export_mode)
         self.resolution = QComboBox()
-        self.resolution.addItems(["1080", "720", "480"])
+        self.resolution.addItems(["1920", "1080", "720", "480"])
+        self.resolution.setCurrentText("1080")
         export_form.addRow("Высота, px", self.resolution)
         self.crf = QSpinBox()
         self.crf.setRange(15, 35)
@@ -318,11 +326,30 @@ class MainWindow(QMainWindow):
         self.crop.setRange(0, 100)
         self.crop.setValue(50)
         export_form.addRow("Кадр по горизонтали", self.crop)
+        self.crop_y = QSlider(Qt.Orientation.Horizontal)
+        self.crop_y.setRange(0, 100)
+        self.crop_y.setValue(50)
+        export_form.addRow("Кадр по вертикали", self.crop_y)
+        self.webcam = {}
+        for key, label, value in [("webcam_x", "Камера: положение X, %", 0),
+                                   ("webcam_y", "Камера: положение Y, %", 0),
+                                   ("webcam_w", "Камера: ширина, %", 30),
+                                   ("webcam_h", "Камера: высота, %", 30)]:
+            field = QSpinBox()
+            field.setRange(5 if key.endswith(("w", "h")) else 0, 100)
+            field.setValue(value)
+            self.webcam[key] = field
+            export_form.addRow(label, field)
         self.volume = QDoubleSpinBox()
         self.volume.setRange(0, 3)
         self.volume.setSingleStep(0.1)
         self.volume.setValue(1)
         export_form.addRow("Громкость ×", self.volume)
+        self.fade = QDoubleSpinBox()
+        self.fade.setRange(0, 2)
+        self.fade.setSingleStep(0.1)
+        self.fade.setValue(0.1)
+        export_form.addRow("Плавные края звука, с", self.fade)
         il.addLayout(export_form)
         self.burn = QCheckBox("Прожечь субтитры (+ отдельный SRT)")
         il.addWidget(self.burn)
@@ -332,6 +359,7 @@ class MainWindow(QMainWindow):
         self.reason.setObjectName("muted")
         self.reason.setTextFormat(Qt.TextFormat.PlainText)
         il.addWidget(self.reason)
+        il.addWidget(button("Визуальные свидетельства…", self.show_evidence))
         il.addStretch()
         self.inspector_scroll = QScrollArea()
         self.inspector_scroll.setWidgetResizable(True)
@@ -364,6 +392,24 @@ class MainWindow(QMainWindow):
         bottom.addWidget(button("Экспортировать", self.enqueue))
         bottom.addWidget(button("Экспортировать и далее  ↵", self.export_next, True, "Ctrl+Enter"))
         layout.addLayout(bottom)
+        for field in (self.layout_choice, self.export_mode, self.resolution):
+            field.currentTextChanged.connect(self.options_changed)
+        self.crf.valueChanged.connect(self.options_changed)
+        self.crop.valueChanged.connect(self.options_changed)
+        self.crop_y.valueChanged.connect(self.options_changed)
+        self.volume.valueChanged.connect(self.options_changed)
+        self.fade.valueChanged.connect(self.options_changed)
+        for field in self.webcam.values():
+            field.valueChanged.connect(self.options_changed)
+        self.burn.toggled.connect(self.options_changed)
+        self.layout_choice.currentTextChanged.connect(self.update_layout_fields)
+        self.update_layout_fields()
+
+    def update_layout_fields(self, *_):
+        webcam = self.layout_choice.currentText() == "вебкамера + игра"
+        for field in self.webcam.values():
+            self.export_form.setRowVisible(field, webcam)
+        self.inspector.setMinimumHeight(1080 if webcam else 790)
 
     def create_menu(self):
         menu = self.menuBar().addMenu("Проект")
@@ -372,10 +418,14 @@ class MainWindow(QMainWindow):
                              ("Импорт SRT/VTT…", self.import_captions), ("Экспорт всех оставленных", self.export_kept)]:
             item = menu.addAction(text)
             item.triggered.connect(action)
+        menu.addAction("Кэш проекта…", self.cache_dialog)
         view = self.menuBar().addMenu("Вид")
         for text, widget in [("Расшифровка", self.transcript_panel), ("Инспектор клипа", self.inspector_scroll)]:
-            action = QAction(text, self, checkable=True, checked=True)
+            visible = self.preferences.value("visible/"+text, True, type=bool)
+            action = QAction(text, self, checkable=True, checked=visible)
+            widget.setVisible(visible)
             action.toggled.connect(widget.setVisible)
+            action.toggled.connect(lambda checked, key=text: self.preferences.setValue("visible/"+key, checked))
             view.addAction(action)
         edit = self.menuBar().addMenu("Правка")
         edit.addAction("Отменить", self.undo)
@@ -451,10 +501,18 @@ class MainWindow(QMainWindow):
         try:
             data = probe(path)
             self.save()
-            settings = dict(self.project.settings)
-            self.project = Project(title=Path(path).stem, source=str(Path(path).resolve()), **data, settings=settings)
+            settings = {key: self.project.settings.get(key, value) for key, value in default_settings().items()}
+            settings.update({key: self.project.settings[key] for key in ("export_dir", "export_options")
+                             if key in self.project.settings})
+            settings["transcribe"] = True
+            project = Project(title=Path(path).stem, source=str(Path(path).resolve()), **data, settings=settings)
             folder = Path(settings["models_dir"]).parent / "projects" / (Path(path).stem[:70]+"-"+uid()[:8])
-            self.store = ProjectStore(folder)
+            store = ProjectStore(folder)
+            project_lock = self.acquire_project_lock(folder)
+            if self.project_lock:
+                self.project_lock.unlock()
+            self.project_lock = project_lock
+            self.project, self.store = project, store
             self.selected = None
             self.undo_stack.clear()
             self.redo_stack.clear()
@@ -474,22 +532,41 @@ class MainWindow(QMainWindow):
         if not self.can_switch():
             return
         try:
+            if not (Path(folder)/"project.sqlite").is_file():
+                raise ValueError("В выбранной папке нет проекта StreamCut (project.sqlite)")
             store = ProjectStore(folder)
-            project = store.load()
+            project_lock = self.acquire_project_lock(folder)
             self.save()
+            project = store.load()
+            if self.project_lock and self.project_lock is not project_lock:
+                self.project_lock.unlock()
+            self.project_lock = project_lock
             self.project, self.store = project, store
             self.selected = None
             self.undo_stack.clear()
             self.redo_stack.clear()
-            self.source_valid = Path(project.source).exists() and fingerprint(project.source) == project.fingerprint
+            try:
+                self.source_valid = Path(project.source).exists() and fingerprint(project.source) == project.fingerprint
+            except OSError:
+                self.source_valid = False
             self.load_media()
             if not self.source_valid:
                 self.welcome.setText("Исходник перемещён или изменён.\nПроект → Переподключить исходник")
                 self.welcome.show()
                 self.statusBar().showMessage("Исходник недоступен. Правки сохранены; экспорт заблокирован до переподключения.")
             self.update_queue()
+            QTimer.singleShot(200, self.run_queue)
         except Exception as exc:
             self.error(exc)
+
+    def acquire_project_lock(self, folder):
+        if self.store and self.project_lock and self.store.folder.resolve() == Path(folder).resolve():
+            return self.project_lock
+        lock = QLockFile(str(Path(folder)/"session.lock"))
+        lock.setStaleLockTime(0)
+        if not lock.tryLock(0):
+            raise RuntimeError("Этот проект уже открыт в другом окне StreamCut. Закройте его там перед открытием")
+        return lock
 
     def relink(self):
         if not self.store or not self.can_switch():
@@ -515,6 +592,8 @@ class MainWindow(QMainWindow):
             if self.source_valid:
                 self.player.play(self.project.source)
                 self.player.pause = True
+                if self.project.audio_tracks:
+                    self.player.aid = self.project.audio+1
         self.welcome.setVisible(not self.source_valid or not self.player)
         self.source_label.setText(self.project.title[:70])
         self.source_label.setToolTip(self.project.source + "\nПроект: " + str(self.store.folder))
@@ -525,6 +604,20 @@ class MainWindow(QMainWindow):
             self.audio.addItem(f"Звук {i+1} · {track['language']} {track['label']}")
         self.audio.setCurrentIndex(self.project.audio)
         self.audio.blockSignals(False)
+        self.loading = True
+        saved_options = ExportOptions.model_validate(self.project.settings.get("export_options", {}))
+        self.layout_choice.setCurrentText(saved_options.layout)
+        self.export_mode.setCurrentText(saved_options.mode)
+        self.resolution.setCurrentText(str(saved_options.height))
+        self.crf.setValue(saved_options.crf)
+        self.crop.setValue(round(saved_options.crop_x*100))
+        self.crop_y.setValue(round(saved_options.crop_y*100))
+        self.volume.setValue(saved_options.volume)
+        self.fade.setValue(saved_options.fade)
+        for key, field in self.webcam.items():
+            field.setValue(round(getattr(saved_options, key)*100))
+        self.burn.setChecked(saved_options.subtitles)
+        self.loading = False
         for timeline in (self.overview, self.timeline):
             timeline.duration = max(1, self.project.duration)
             timeline.clips = self.project.clips
@@ -543,9 +636,10 @@ class MainWindow(QMainWindow):
             return
         if self.worker.running():
             self.stop_analysis()
-        if index != self.project.audio and self.project.segments:
-            self.project.settings["transcript_archive"] = [s.model_dump() for s in self.project.segments]
-            self.project.segments.clear()
+        if index != self.project.audio:
+            archive = self.project.settings.setdefault("transcripts_by_track", {})
+            archive[str(self.project.audio)] = [s.model_dump() for s in self.project.segments]
+            self.project.segments = [Segment.model_validate(s) for s in archive.get(str(index), [])]
             self.refresh_transcript()
         self.project.audio = index
         if self.player and self.source_valid:
@@ -560,9 +654,19 @@ class MainWindow(QMainWindow):
     def seek(self, position):
         if self.player and self.source_valid:
             position = max(0, min(self.project.duration-0.001, position))
-            self.player.command("seek", position, "absolute+exact")
+            self.pending_seek = position
+            self.try_pending_seek()
             self.position = position
             self.preview_timer.start(650)
+
+    def try_pending_seek(self):
+        if self.pending_seek is not None and self.player:
+            try:
+                self.player.command("seek", self.pending_seek, "absolute+exact")
+                self.pending_seek = None
+            except Exception:
+                # libmpv loads asynchronously; retry after file-loaded instead of showing a modal error.
+                pass
 
     def safe_seek(self, text):
         try:
@@ -582,6 +686,7 @@ class MainWindow(QMainWindow):
     def tick(self):
         if self.player and self.source_valid:
             try:
+                self.try_pending_seek()
                 self.position = float(self.player.time_pos or 0)
                 current = self.current()
                 if self.loop.isChecked() and current and self.position >= current.end:
@@ -676,15 +781,18 @@ class MainWindow(QMainWindow):
                 timeline.start, timeline.end = start, end
             self.changed()
             self.refresh_clips()
+            return True
         except ValueError as exc:
             self.error(exc)
+            return False
 
     def edit_bounds(self):
         if not self.loading:
             try:
-                self.apply_bounds(parse_time(self.inpoint.text()), parse_time(self.outpoint.text()))
+                return self.apply_bounds(parse_time(self.inpoint.text()), parse_time(self.outpoint.text()))
             except ValueError as exc:
                 self.error(exc)
+                return False
 
     def mark(self, start):
         clip = self.current()
@@ -697,6 +805,8 @@ class MainWindow(QMainWindow):
     def edit_metadata(self, *_):
         clip = self.current()
         if clip and not self.loading:
+            if (clip.title, clip.note, clip.status) != (self.title.text() or "Без названия", self.note.toPlainText(), self.status.currentText()):
+                self.history()
             clip.title = self.title.text() or "Без названия"
             clip.note = self.note.toPlainText()
             clip.status = self.status.currentText()
@@ -760,6 +870,7 @@ class MainWindow(QMainWindow):
         text, ok = QInputDialog.getMultiLineText(self, "Исправить реплику", "Текст", segment.text)
         if ok:
             segment.text = text
+            segment.edited = True
             self.refresh_transcript()
             self.changed()
 
@@ -787,7 +898,7 @@ class MainWindow(QMainWindow):
             self.project.settings = dialog.values()
             self.project.settings.pop("visual_start", None)
             self.project.settings.pop("visual_end", None)
-            self.preferences.setValue("analysis_settings", json.dumps(self.project.settings, ensure_ascii=False))
+            self.remember_settings()
             self.save()
 
     def models(self):
@@ -795,8 +906,12 @@ class MainWindow(QMainWindow):
             return self.error("Остановите анализ перед загрузкой или выгрузкой моделей")
         dialog = ModelsDialog(self.project.settings, self)
         dialog.exec()
-        self.preferences.setValue("analysis_settings", json.dumps(self.project.settings, ensure_ascii=False))
+        self.remember_settings()
         self.save()
+
+    def remember_settings(self):
+        values = {key: self.project.settings.get(key, value) for key, value in default_settings().items()}
+        self.preferences.setValue("analysis_settings", json.dumps(values, ensure_ascii=False))
 
     def start_analysis(self):
         if not self.source_valid or not self.store:
@@ -815,6 +930,9 @@ class MainWindow(QMainWindow):
     def analyze_selection(self):
         clip = self.current()
         if clip:
+            if self.worker.running():
+                return
+            self.settings_before_selection = dict(self.project.settings)
             self.project.settings.update(visual_start=clip.start, visual_end=clip.end, transcribe=False,
                                          text_search=False, visual="подробный")
             self.start_analysis()
@@ -845,6 +963,9 @@ class MainWindow(QMainWindow):
         if "progress" in event:
             self.analysis_progress.setValue(int(event["progress"]*100))
         if kind == "segments":
+            if "block_start" in event:
+                self.project.segments = [s for s in self.project.segments if s.edited or not (
+                    event["block_start"] <= s.start < event["block_end"])]
             ids = {s.id for s in self.project.segments}
             self.project.segments.extend(Segment.model_validate(s) for s in event["items"] if s["id"] not in ids)
             self.refresh_transcript()
@@ -853,19 +974,72 @@ class MainWindow(QMainWindow):
                 merge_candidate(self.project.clips, Clip.model_validate(data))
             self.refresh_clips()
         if kind == "visual":
+            existing = {e["id"] for e in self.project.visual_evidence}
+            self.project.visual_evidence.extend(e for e in event.get("evidence", []) if e["id"] not in existing)
             self.project.coverage.extend(Span(start=t, end=min(self.project.duration, t+0.001)) for t in event["samples"])
             for timeline in (self.overview, self.timeline):
                 timeline.coverage = self.project.coverage
+        if kind == "model":
+            self.project.settings.setdefault("model_versions", {})[event["name"]] = event["revision"]
+            self.save()
         if "checkpoint" in event:
             self.project.checkpoints.setdefault("analysis", []).append(event["checkpoint"])
             self.save()
 
     def analysis_finished(self):
+        if hasattr(self, "settings_before_selection"):
+            self.project.settings = self.settings_before_selection
+            del self.settings_before_selection
         self.analyze_button.setEnabled(True)
         self.analyze_button.setText("Продолжить анализ")
         self.pause_button.setEnabled(False)
         self.pause_button.setText("Пауза")
         self.save()
+
+    def show_evidence(self):
+        clip = self.current()
+        if not clip:
+            return
+        items = [e for e in self.project.visual_evidence if e["id"] in clip.evidence]
+        if not items:
+            self.statusBar().showMessage("У этого момента нет сохранённых визуальных свидетельств", 5000)
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Кадры и обоснование модели · проверьте событие в плеере")
+        layout = QVBoxLayout(dialog)
+        for item in items:
+            text = QLabel(timecode(item["seconds"])+" · "+item["description"])
+            text.setWordWrap(True)
+            text.setTextFormat(Qt.TextFormat.PlainText)
+            layout.addWidget(text)
+            image = QLabel()
+            path = Path(item["path"])
+            if not path.is_absolute():
+                path = self.store.folder/path
+            image.setPixmap(QPixmap(str(path)).scaled(640, 360, Qt.AspectRatioMode.KeepAspectRatio))
+            layout.addWidget(image)
+        dialog.exec()
+
+    def cache_dialog(self):
+        if not self.store:
+            return
+        if not self.can_switch():
+            return
+        folder = self.store.folder/"cache"
+        files = [p for p in folder.iterdir() if p.is_file() and (
+            p.name in ("audio.wav", "preview.wav", "analysis.json") or
+            (p.name.startswith("preview-") and p.suffix == ".jpg") or
+            (p.name.endswith("preview.mp4")))]
+        size = sum(p.stat().st_size for p in files)
+        if QMessageBox.question(self, "Кэш проекта", f"Временные данные: {size/1024**2:.1f} МБ.\n"
+            "Очистить волны, миниатюры и временные предпросмотры?\n"
+            "Расшифровка, правки, свидетельства, исходник и готовые клипы сохранятся.") == QMessageBox.StandardButton.Yes:
+            protected = {Path(j.destination).resolve() for j in self.project.jobs
+                         if not j.destination.endswith("preview.mp4")}
+            for path in files:
+                if path.resolve() not in protected:
+                    path.unlink(missing_ok=True)
+            self.statusBar().showMessage("Временный кэш очищен")
 
     def choose_export_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Папка готовых клипов", self.project.settings.get("export_dir", ""))
@@ -876,14 +1050,22 @@ class MainWindow(QMainWindow):
     def export_options(self):
         return ExportOptions(mode=self.export_mode.currentText(), layout=self.layout_choice.currentText(),
                              crf=self.crf.value(), height=int(self.resolution.currentText()),
-                             crop_x=self.crop.value()/100, volume=self.volume.value(), subtitles=self.burn.isChecked())
+                             crop_x=self.crop.value()/100, crop_y=self.crop_y.value()/100,
+                             volume=self.volume.value(), fade=self.fade.value(), subtitles=self.burn.isChecked(),
+                             **{key: field.value()/100 for key, field in self.webcam.items()})
+
+    def options_changed(self, *_):
+        if not self.loading:
+            self.project.settings["export_options"] = self.export_options().model_dump()
+            self.changed()
 
     def enqueue(self, checked=False, clip=None, destination=None):
         clip = clip or self.current()
         if not clip or not self.source_valid:
             self.error("Выберите момент с доступным исходником")
             return False
-        self.edit_bounds()
+        if not self.edit_bounds():
+            return False
         folder = self.project.settings.get("export_dir")
         if not folder and not destination:
             self.choose_export_folder()
@@ -893,8 +1075,11 @@ class MainWindow(QMainWindow):
         if len(clip.spans) != 1:
             self.error("Составной экспорт ещё не подключён")
             return False
-        safe = lambda s: re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", s).strip(" .")[:70]
-        name = safe(self.project.title)+"_"+timecode(clip.start).replace(":", "-")+"_"+safe(clip.title)
+        safe = lambda s: re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", s).strip(" .")[:140]
+        name = self.project.settings.get("export_template", "{project}_{time}_{title}")
+        for token, value in {"project": self.project.title, "time": timecode(clip.start).replace(":", "-"), "title": clip.title}.items():
+            name = name.replace("{"+token+"}", safe(value)[:45])
+        name = safe(name) or "StreamCut"
         path = Path(destination) if destination else Path(folder)/(name+"_"+uid()[:6]+".mp4")
         job = ExportJob(clip=clip.model_copy(deep=True), source=self.project.source,
                         fingerprint=self.project.fingerprint, audio=self.project.audio,
@@ -1093,4 +1278,6 @@ class MainWindow(QMainWindow):
         self.preferences.setValue("panels", self.splitter.saveState())
         if self.player:
             self.player.terminate()
+        if self.project_lock:
+            self.project_lock.unlock()
         event.accept()

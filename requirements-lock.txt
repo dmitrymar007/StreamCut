@@ -1,7 +1,7 @@
 altgraph==0.17.5
 annotated-types==0.8.0
 anyio==4.15.1
-av==19.0.2
+av==16.1.0
 backports.zstd==1.8.0
 brotli==1.2.1
 certifi==2026.10.23
