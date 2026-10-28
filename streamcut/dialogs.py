@@ -114,6 +114,7 @@ class ModelsDialog(QDialog):
         self.model = QComboBox()
         self.model.setEditable(True)
         self.model.addItems(["qwen3.5:4b", "qwen3.5:2b"])
+        self.model.setCurrentText(settings["text_model"])
         self.folder = QLineEdit(settings["models_dir"])
         form.addRow("Ollama", self.url)
         form.addRow("Модель", self.model)
@@ -138,6 +139,12 @@ class ModelsDialog(QDialog):
         free.clicked.connect(self.release)
         row.addWidget(free)
         layout.addLayout(row)
+        roles = QHBoxLayout()
+        for label, role in [("Использовать для текста", "text_model"), ("Для изображения", "vision_model")]:
+            select = QPushButton(label)
+            select.clicked.connect(lambda checked=False, r=role: self.select_role(r))
+            roles.addWidget(select)
+        layout.addLayout(roles)
         tests = QHBoxLayout()
         for label, mode in [("Тест текста", "test-text"), ("Тест речи · 30 с", "test-asr"), ("Описать кадр", "test-image")]:
             test = QPushButton(label)
@@ -236,11 +243,22 @@ class ModelsDialog(QDialog):
             path, _ = QFileDialog.getOpenFileName(self, "Выберите изображение" if mode == "test-image" else "Выберите аудио или видео")
             if not path:
                 return
-            args = [mode, path, "--model", "small" if mode == "test-asr" else self.model.currentText(),
+            args = [mode, path, "--model", self.settings.get("whisper_model", "small") if mode == "test-asr" else self.model.currentText(),
                     "--url", self.url.text(), "--folder", self.folder.text()]
         self.output.appendPlainText("Локальный тест выполняется…")
         self.progress.setRange(0, 0)
         self.worker.start(args)
+
+    def select_role(self, role):
+        model, url = self.model.currentText(), self.url.text()
+        def assign(info):
+            capability = "vision" if role == "vision_model" else "completion"
+            if capability not in info.get("capabilities", []):
+                self.output.appendPlainText("У выбранной модели нет необходимой возможности: "+capability)
+                return
+            self.settings[role] = model
+            self.output.appendPlainText("Выбрана модель "+model+(" для изображения" if role == "vision_model" else " для текста"))
+        self.submit(lambda: Ollama(url).show(model), assign)
 
     def on_event(self, event):
         self.output.appendPlainText(event.get("text", ""))

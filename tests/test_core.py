@@ -222,3 +222,29 @@ def test_visual_coverage_and_resume(fixture_video, tmp_path, monkeypatch, capsys
     snapshot.write_text(project.model_dump_json(), encoding="utf-8")
     worker.analyze(snapshot, folder)
     assert len(calls) == 2
+
+
+def test_internal_cut_and_order():
+    from streamcut.domain import remove_range
+    spans = remove_range([Span(start=10, end=30)], Span(start=15, end=20))
+    assert [(s.start, s.end) for s in spans] == [(10, 15), (20, 30)]
+    clip = Clip(spans=spans)
+    assert clip.duration == 15
+    with pytest.raises(ValueError):
+        remove_range(spans, Span(start=0, end=40))
+    with pytest.raises(ValidationError):
+        Clip(spans=[Span(start=20, end=30), Span(start=10, end=25)])
+
+
+def test_composite_export_and_shifted_captions(fixture_video, tmp_path):
+    target = tmp_path/"Сборка клипа.mp4"
+    job = ExportJob(clip=Clip(spans=[Span(start=0.4, end=1.4), Span(start=3, end=4.5)]),
+                    source=str(fixture_video), fingerprint=fingerprint(fixture_video), destination=str(target),
+                    options=ExportOptions(height=480), segments=[Segment(start=3.2, end=4, text="Второй фрагмент")])
+    export_clip(job, threading.Event(), lambda p: None)
+    meta = probe(str(target))
+    assert abs(meta["duration"]-2.5) < 0.15
+    text = target.with_suffix(".srt").read_text(encoding="utf-8")
+    assert "Второй фрагмент" in text
+    assert "00:00:01," in text
+    assert not list(tmp_path.glob(".streamcut-*"))

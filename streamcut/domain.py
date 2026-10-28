@@ -62,11 +62,18 @@ class Clip(BaseModel):
     spans: list[Span] = Field(min_length=1)
     reason: str = "Добавлен вручную"
     evidence: list[str] = Field(default_factory=list)
+    quotes: list[dict] = Field(default_factory=list)
     sources: list[str] = Field(default_factory=lambda: ["вручную"])
     score: float | None = None
     status: str = "новый"
     note: str = ""
     edited: bool = False
+
+    @model_validator(mode="after")
+    def ordered_spans(self):
+        if any(a.end > b.start for a, b in zip(self.spans, self.spans[1:])):
+            raise ValueError("Фрагменты должны идти по времени и не пересекаться")
+        return self
 
     @property
     def start(self):
@@ -154,8 +161,25 @@ def merge_candidate(clips: list[Clip], incoming: Clip) -> Clip:
         if overlap / max(union, 0.001) > 0.7 and set(current.evidence) & set(incoming.evidence):
             current.evidence = list(dict.fromkeys(current.evidence + incoming.evidence))
             current.sources = list(dict.fromkeys(current.sources + incoming.sources))
+            existing_quotes = {(q.get("id"), q.get("text")) for q in current.quotes}
+            current.quotes.extend(q for q in incoming.quotes if (q.get("id"), q.get("text")) not in existing_quotes)
             if incoming.reason not in current.reason:
                 current.reason += "\n" + incoming.reason
             return current
     clips.append(incoming)
     return incoming
+
+
+def remove_range(spans: list[Span], cut: Span) -> list[Span]:
+    result = []
+    for span in spans:
+        if cut.end <= span.start or cut.start >= span.end:
+            result.append(span.model_copy())
+            continue
+        if span.start < cut.start:
+            result.append(Span(start=span.start, end=cut.start))
+        if span.end > cut.end:
+            result.append(Span(start=cut.end, end=span.end))
+    if not result:
+        raise ValueError("Нельзя удалить все фрагменты клипа")
+    return result

@@ -18,6 +18,10 @@ def main():
     app = QApplication(sys.argv)
     app.setOrganizationName("StreamCut")
     app.setApplicationName("StreamCut")
+    from PySide6.QtCore import QLibraryInfo, QTranslator
+    app.translator = QTranslator(app)
+    if app.translator.load("qtbase_ru", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
+        app.installTranslator(app.translator)
     app.setStyle("Fusion")
     app.setStyleSheet(THEME)
     window = MainWindow()

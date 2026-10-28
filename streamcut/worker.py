@@ -27,6 +27,12 @@ def control(folder):
         time.sleep(0.3)
 
 
+def estimate(remaining, completed, started, batches):
+    if batches < 2 or completed <= 0:
+        return None
+    return max(0, round((time.monotonic()-started)/completed*remaining))
+
+
 def analyze(snapshot, folder):
     project = Project.model_validate_json(snapshot.read_text(encoding="utf-8"))
     if fingerprint(project.source) != project.fingerprint:
@@ -50,13 +56,16 @@ def analyze(snapshot, folder):
                                  download_root=settings["models_dir"], local_files_only=True)
         except (OSError, ValueError) as exc:
             raise RuntimeError(f"Whisper {asr_model} не подготовлен. Откройте «Модели» и скачайте его. {exc}") from exc
-        for start in range(0, int(project.duration + 0.999), 300):
+        starts = range(0, int(project.duration + 0.999), 300)
+        pending = sum(min(300, project.duration-s) for s in starts if key(base+[s]) not in completed)
+        started, measured, batches, eta = time.monotonic(), 0.0, 0, None
+        for start in starts:
             checkpoint = key(base + [start])
             if checkpoint in completed:
                 continue
             control(folder)
             duration = min(300, project.duration - start)
-            emit("status", text=f"Речь · {start//60}–{(start+duration)/60:.0f} мин")
+            emit("status", text=f"Речь · {start//60}–{(start+duration)/60:.0f} мин", eta_seconds=eta)
             audio = folder / "audio.wav"
             try:
                 extract_audio(project.source, project.audio, start, duration, audio)
@@ -77,8 +86,12 @@ def analyze(snapshot, folder):
                 edited = [s for s in segments if s.edited and s.start < start+duration and s.end > start]
                 batch = [s for s in batch if not any(e.start < s.end and e.end > s.start for e in edited)]
                 segments = [s for s in segments if s.edited or not (start <= s.start < start+duration)] + batch
+                measured += duration
+                batches += 1
+                eta = estimate(pending-measured, measured, started, batches)
                 emit("segments", items=[s.model_dump() for s in batch], checkpoint=checkpoint,
                      block_start=start, block_end=start+duration,
+                     eta_seconds=eta,
                      progress=min(1, (start + duration) / project.duration))
             finally:
                 audio.unlink(missing_ok=True)
@@ -100,13 +113,17 @@ def analyze(snapshot, folder):
             end = max(end, position + 1)
             windows.append(segments[position:end])
             position = end if end == len(segments) else max(position + 1, end - 5)
+        def window_key(window):
+            return key(["text-v1", model_name, revision, settings.get("criteria"),
+                        [(s.id, s.text, s.start, s.end) for s in window]])
+        pending = sum(window_key(w) not in completed for w in windows)
+        started, measured, eta = time.monotonic(), 0, None
         for index, window in enumerate(windows):
             control(folder)
-            checkpoint = key(["text-v1", model_name, revision, settings.get("criteria"),
-                              [(s.id, s.text, s.start, s.end) for s in window]])
+            checkpoint = window_key(window)
             if checkpoint in completed:
                 continue
-            emit("status", text=f"Поиск по речи · окно {index+1}/{len(windows)}")
+            emit("status", text=f"Поиск по речи · окно {index+1}/{len(windows)}", eta_seconds=eta)
             records = [{"id": s.id, "text": s.text} for s in window]
             result = client.search(model_name, records, settings["criteria"], threads=threads)
             clips = []
@@ -116,8 +133,11 @@ def analyze(snapshot, folder):
                 clips.append(Clip(title=proposal.title, reason=proposal.reason, score=proposal.score,
                                   spans=[Span(start=max(0, window[a].start-1),
                                               end=min(project.duration, window[b].end+1))],
-                                  sources=["речь"], evidence=ids[a:b+1]))
-            emit("clips", items=[c.model_dump() for c in clips], checkpoint=checkpoint,
+                                  sources=["речь"], evidence=ids[a:b+1],
+                                  quotes=[s.model_dump(include={"id", "start", "end", "text"}) for s in window[a:b+1]]))
+            measured += 1
+            eta = estimate(pending-measured, measured, started, measured)
+            emit("clips", items=[c.model_dump() for c in clips], checkpoint=checkpoint, eta_seconds=eta,
                  progress=(index+1)/max(1, len(windows)))
         client.release(model_name)
     visual = settings.get("visual", "выключен")
@@ -147,15 +167,18 @@ def analyze(snapshot, folder):
         while ranges:
             begin, finish, interval, refined = ranges.popleft()
             position = begin
+            started, measured, batches, eta = time.monotonic(), 0, 0, None
             while position < finish:
                 control(folder)
                 times = [position+i*interval for i in range(3) if position+i*interval < finish]
-                checkpoint = key(["vision-v2", project.fingerprint, visual_model, revision, times, settings["criteria"]])
+                context = [(s.id, s.text) for s in segments if s.start < times[-1]+interval and s.end > times[0]]
+                checkpoint = key(["vision-v2", project.fingerprint, visual_model, revision, interval,
+                                  times, context, settings["criteria"]])
                 if checkpoint in completed:
                     position += interval*3
                     continue
                 mode = "Уточнение изображения" if refined else "Изображение"
-                emit("status", text=f"{mode} · {position/60:.1f}/{finish/60:.1f} мин · шаг {interval} с")
+                emit("status", text=f"{mode} · {position/60:.1f}/{finish/60:.1f} мин · шаг {interval} с", eta_seconds=eta)
                 images, records = [], []
                 try:
                     for n, stamp in enumerate(times):
@@ -184,7 +207,10 @@ def analyze(snapshot, folder):
                             evidence.append({"id": frame_id, "seconds": records[n]["seconds"],
                                              "path": saved_frame.relative_to(folder.parent).as_posix(),
                                              "description": reason, "model": visual_model, "interval": interval})
-                    emit("visual", items=[c.model_dump() for c in clips], checkpoint=checkpoint,
+                    measured += len(times)
+                    batches += 1
+                    eta = estimate(max(0, (finish-position-interval*len(times))/interval), measured, started, batches)
+                    emit("visual", items=[c.model_dump() for c in clips], checkpoint=checkpoint, eta_seconds=eta,
                          samples=times, interval=interval, evidence=evidence,
                          progress=min(1, (position-begin+interval*3)/max(0.001, finish-begin)))
                     completed.add(checkpoint)
@@ -220,7 +246,11 @@ def main():
                         if item.get("error"):
                             raise RuntimeError(item["error"])
                         if time.monotonic()-last_emit > 0.5 or item.get("status") == "success":
-                            emit("status", text=item.get("status", ""),
+                            status = item.get("status", "")
+                            status = {"pulling manifest": "Получение описания модели", "verifying sha256 digest": "Проверка контрольной суммы",
+                                      "writing manifest": "Сохранение модели", "success": "Модель готова"}.get(status,
+                                      "Загрузка слоя модели" if status.startswith("pulling ") else status)
+                            emit("status", text=status,
                                  progress=item.get("completed", 0)/max(1, item.get("total", 1)))
                             last_emit = time.monotonic()
             emit("done", text="Модель Ollama скачана")

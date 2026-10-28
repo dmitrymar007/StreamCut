@@ -5,8 +5,8 @@ import os
 import re
 from pathlib import Path
 
-from PySide6.QtCore import QLockFile, QSettings, QStringListModel, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QKeySequence, QPixmap, QShortcut
+from PySide6.QtCore import QLockFile, QSettings, QStringListModel, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QSplitter,
@@ -47,10 +48,11 @@ from .domain import (
     fingerprint,
     merge_candidate,
     parse_time,
+    remove_range,
     timecode,
     uid,
 )
-from .media import VENDOR, probe
+from .media import ROOT, VENDOR, probe
 from .storage import ProjectStore
 from .tasks import ExportThread, PreviewThread, WorkerProcess
 from .widgets import ClipDelegate, ClipListModel, Timeline
@@ -77,9 +79,12 @@ def panel(title):
 
 
 class MainWindow(QMainWindow):
+    playbackError = Signal(str)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("StreamCut · локальная мастерская клипов")
+        self.setWindowIcon(QIcon(str(ROOT/"assets"/"streamcut.ico")))
         self.resize(1360, 900)
         self.setMinimumSize(1050, 710)
         self.setAcceptDrops(True)
@@ -104,6 +109,7 @@ class MainWindow(QMainWindow):
         self.worker = WorkerProcess(self)
         self.worker.event.connect(self.analysis_event)
         self.worker.finished.connect(self.analysis_finished)
+        self.playbackError.connect(lambda text: self.statusBar().showMessage("Ошибка плеера: "+text, 15000))
         self.create_ui()
         self.create_menu()
         self.create_shortcuts()
@@ -141,6 +147,7 @@ class MainWindow(QMainWindow):
         top.addWidget(brand)
         self.source_label = QLabel("Мастерская клипов  /  Новый проект")
         self.source_label.setObjectName("muted")
+        self.source_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         top.addWidget(self.source_label, 1)
         top.addWidget(button("Открыть видео", self.choose_source))
         top.addWidget(button("Проекты", self.choose_project))
@@ -150,6 +157,7 @@ class MainWindow(QMainWindow):
         progress_row = QHBoxLayout()
         self.analysis_label = QLabel("Локальный анализ · готов к настройке")
         self.analysis_label.setObjectName("muted")
+        self.analysis_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         progress_row.addWidget(self.analysis_label, 1)
         self.analysis_progress = QProgressBar()
         self.analysis_progress.setFixedWidth(150)
@@ -295,6 +303,10 @@ class MainWindow(QMainWindow):
         row.addWidget(button("Конец", lambda: self.seek(max(self.current().start, self.current().end-3)) if self.current() else None))
         il.addLayout(row)
         self.status = QComboBox()
+        fragments = QHBoxLayout()
+        fragments.addWidget(button("Фрагменты…", self.edit_fragments))
+        fragments.addWidget(button("Вырезать внутри…", self.cut_inside))
+        il.addLayout(fragments)
         self.status.addItems(["новый", "просмотрен", "оставлен", "отклонён"])
         self.status.currentTextChanged.connect(self.edit_metadata)
         il.addWidget(self.status)
@@ -472,7 +484,9 @@ class MainWindow(QMainWindow):
             import mpv
             self.player = mpv.MPV(wid=str(int(self.video.winId())), hwdec="auto-safe", keep_open=True,
                                   input_default_bindings=False, input_vo_keyboard=False, osc=False,
-                                  idle=True, pause=True, volume=100)
+                                  idle=True, pause=True, volume=100,
+                                  log_handler=lambda level, component, message: self.playbackError.emit(message.strip())
+                                  if level in ("error", "fatal") else None)
         except Exception as exc:
             self.player_error = str(exc)
             self.welcome.setText("Не удалось загрузить libmpv.\nЗапустите scripts/setup_media.py\n"+str(exc))
@@ -500,7 +514,8 @@ class MainWindow(QMainWindow):
             return
         try:
             data = probe(path)
-            self.save()
+            if not self.save():
+                raise OSError("Не удалось сохранить текущий проект. Освободите место перед открытием другого файла")
             settings = {key: self.project.settings.get(key, value) for key, value in default_settings().items()}
             settings.update({key: self.project.settings[key] for key in ("export_dir", "export_options")
                              if key in self.project.settings})
@@ -536,8 +551,10 @@ class MainWindow(QMainWindow):
                 raise ValueError("В выбранной папке нет проекта StreamCut (project.sqlite)")
             store = ProjectStore(folder)
             project_lock = self.acquire_project_lock(folder)
-            self.save()
+            if not self.save():
+                raise OSError("Не удалось сохранить текущий проект. Освободите место перед переключением")
             project = store.load()
+            project.settings = {key: self.project.settings.get(key, value) for key, value in default_settings().items()} | project.settings
             if self.project_lock and self.project_lock is not project_lock:
                 self.project_lock.unlock()
             self.project_lock = project_lock
@@ -587,6 +604,8 @@ class MainWindow(QMainWindow):
                 self.error(exc)
 
     def load_media(self):
+        saved_position = self.project.settings.get("last_position")
+        self.position = min(self.project.duration, max(0, float(saved_position or 0)))
         if self.player:
             self.player.command("stop")
             if self.source_valid:
@@ -624,11 +643,24 @@ class MainWindow(QMainWindow):
             timeline.coverage = self.project.coverage
             timeline.peaks = []
             timeline.thumbnails = []
+            timeline.selection_spans = []
+            timeline.start, timeline.end = 0, min(30, timeline.duration)
             timeline.update()
         self.refresh_clips()
         self.refresh_transcript()
         if self.project.clips:
-            self.select_clip(self.project.clips[0])
+            previous = self.project.settings.get("selected_clip")
+            self.select_clip(next((c for c in self.project.clips if c.id == previous), self.project.clips[0]))
+        else:
+            self.loading = True
+            self.title.clear()
+            self.note.clear()
+            self.inpoint.setText(timecode(0))
+            self.outpoint.setText(timecode(min(30, self.project.duration)))
+            self.reason.setText("Добавьте момент вручную или запустите анализ")
+            self.loading = False
+        if saved_position is not None:
+            self.seek(float(saved_position))
         self.preview_timer.start(1000)
 
     def change_audio(self, index):
@@ -677,7 +709,10 @@ class MainWindow(QMainWindow):
     def frame_step(self, direction):
         if self.player and self.source_valid:
             self.player.pause = True
-            self.player.command("frame-step" if direction > 0 else "frame-back-step")
+            try:
+                self.player.command("frame-step" if direction > 0 else "frame-back-step")
+            except Exception:
+                self.statusBar().showMessage("Видео ещё загружается или покадровый переход недоступен", 5000)
 
     def set_speed(self, value):
         if self.player:
@@ -691,6 +726,11 @@ class MainWindow(QMainWindow):
                 current = self.current()
                 if self.loop.isChecked() and current and self.position >= current.end:
                     self.seek(current.start)
+                elif self.loop.isChecked() and current:
+                    for first, following in zip(current.spans, current.spans[1:]):
+                        if first.end <= self.position < following.start:
+                            self.seek(following.start)
+                            break
             except Exception:
                 pass
         if not self.clock.hasFocus():
@@ -710,7 +750,8 @@ class MainWindow(QMainWindow):
                 continue
             if self.hide_done.isChecked() and clip.status in ("экспортирован", "отклонён"):
                 continue
-            content = " ".join([clip.title, clip.reason, clip.note]+[by_id.get(i, "") for i in clip.evidence])
+            content = " ".join([clip.title, clip.reason, clip.note]+[by_id.get(i, "") for i in clip.evidence]+
+                               [q.get("text", "") for q in clip.quotes])
             if query and query not in content.casefold():
                 continue
             items.append(clip)
@@ -740,11 +781,15 @@ class MainWindow(QMainWindow):
         self.status.setCurrentText(clip.status if clip.status in [self.status.itemText(i) for i in range(self.status.count())] else "оставлен")
         self.reason.setText("ОБОСНОВАНИЕ\n"+clip.reason+"\n\nИсточники: "+", ".join(clip.sources)+
                             (f"\nОценка модели: {clip.score:.0f}/100 (не вероятность)" if clip.score is not None else ""))
+        if clip.quotes:
+            self.reason.setText(self.reason.text()+"\n\nРЕПЛИКИ\n"+"\n".join(
+                timecode(q["start"])+"  "+q["text"] for q in clip.quotes))
         self.inpoint.setText(timecode(clip.start))
         self.outpoint.setText(timecode(clip.end))
         self.loading = False
         for timeline in (self.overview, self.timeline):
             timeline.start, timeline.end = clip.start, clip.end
+            timeline.selection_spans = clip.spans
         self.seek(clip.start)
         self.changed()
 
@@ -772,13 +817,22 @@ class MainWindow(QMainWindow):
             if span.end > self.project.duration:
                 raise ValueError("Граница выходит за конец исходника")
             if clip.start != start or clip.end != end:
+                if len(clip.spans) > 1:
+                    spans = [s.model_copy() for s in clip.spans]
+                    spans[0] = Span(start=start, end=spans[0].end)
+                    spans[-1] = Span(start=spans[-1].start, end=end)
+                else:
+                    spans = [span]
                 self.history()
-                clip.spans = [span]
+                clip.spans = spans
                 clip.edited = True
+                if clip.status in ("в очереди", "экспортирован", "ошибка экспорта"):
+                    clip.status = "оставлен"
             self.inpoint.setText(timecode(start))
             self.outpoint.setText(timecode(end))
             for timeline in (self.overview, self.timeline):
                 timeline.start, timeline.end = start, end
+                timeline.selection_spans = clip.spans
             self.changed()
             self.refresh_clips()
             return True
@@ -813,6 +867,50 @@ class MainWindow(QMainWindow):
             clip.edited = True
             self.changed()
             self.refresh_clips()
+
+    def edit_fragments(self):
+        clip = self.current()
+        if not clip:
+            return
+        value = "\n".join(timecode(s.start)+" .. "+timecode(s.end) for s in clip.spans)
+        text, ok = QInputDialog.getMultiLineText(self, "Составной клип", "Одна строка = фрагмент: начало .. конец.\nФрагменты идут по времени исходника, без пересечений.", value)
+        if ok:
+            try:
+                spans = []
+                for line in text.splitlines():
+                    if line.strip():
+                        a, b = line.split("..")
+                        spans.append(Span(start=parse_time(a), end=parse_time(b)))
+                self.set_fragments(spans)
+            except ValueError as exc:
+                self.error(exc)
+
+    def set_fragments(self, spans):
+        clip = self.current()
+        if not clip:
+            return
+        candidate = Clip.model_validate(clip.model_dump() | {"spans": [s.model_dump() for s in spans]})
+        if candidate.end > self.project.duration:
+            raise ValueError("Фрагмент выходит за конец исходника")
+        self.history()
+        clip.spans = candidate.spans
+        clip.edited = True
+        self.select_clip(clip)
+        self.refresh_clips()
+
+    def cut_inside(self):
+        clip = self.current()
+        if not clip:
+            return
+        start = max(clip.start, min(self.position, clip.end-0.04))
+        text, ok = QInputDialog.getText(self, "Удалить участок из клипа", "Начало .. конец (в исходнике)",
+            text=timecode(start)+" .. "+timecode(min(clip.end, start+5)))
+        if ok:
+            try:
+                a, b = text.split("..")
+                self.set_fragments(remove_range(clip.spans, Span(start=parse_time(a), end=parse_time(b))))
+            except ValueError as exc:
+                self.error(exc)
 
     def undo(self):
         self.restore_edit(self.undo_stack, self.redo_stack)
@@ -850,11 +948,16 @@ class MainWindow(QMainWindow):
     def save(self):
         if self.store:
             try:
+                self.project.settings["last_position"] = self.position
+                self.project.settings["selected_clip"] = self.selected
                 self.store.save(self.project)
                 self.preferences.setValue("recent_project", str(self.store.folder))
                 self.statusBar().showMessage("Сохранено · "+str(self.store.folder), 3000)
+                return True
             except Exception as exc:
                 self.analysis_label.setText("Ошибка сохранения: "+str(exc))
+                return False
+        return True
 
     def refresh_transcript(self, *_):
         query = self.transcript_search.text().casefold()
@@ -932,9 +1035,11 @@ class MainWindow(QMainWindow):
         if clip:
             if self.worker.running():
                 return
-            self.settings_before_selection = dict(self.project.settings)
-            self.project.settings.update(visual_start=clip.start, visual_end=clip.end, transcribe=False,
-                                         text_search=False, visual="подробный")
+            self.selection_overrides = {"visual_start": clip.start, "visual_end": clip.end, "transcribe": False,
+                                        "text_search": False, "visual": "подробный"}
+            self.settings_before_selection = {key: (key in self.project.settings, self.project.settings.get(key))
+                                              for key in self.selection_overrides}
+            self.project.settings.update(self.selection_overrides)
             self.start_analysis()
 
     def pause_analysis(self):
@@ -958,7 +1063,10 @@ class MainWindow(QMainWindow):
     def analysis_event(self, event):
         kind = event["kind"]
         if "text" in event:
-            self.analysis_label.setText(event["text"])
+            text = event["text"]
+            if event.get("eta_seconds") is not None:
+                text += " · осталось ≈ "+timecode(event["eta_seconds"])[:-4]
+            self.analysis_label.setText(text)
             self.analysis_label.setToolTip(event["text"])
         if "progress" in event:
             self.analysis_progress.setValue(int(event["progress"]*100))
@@ -988,8 +1096,14 @@ class MainWindow(QMainWindow):
 
     def analysis_finished(self):
         if hasattr(self, "settings_before_selection"):
-            self.project.settings = self.settings_before_selection
+            for key, (present, value) in self.settings_before_selection.items():
+                if self.project.settings.get(key) == self.selection_overrides[key]:
+                    if present:
+                        self.project.settings[key] = value
+                    else:
+                        self.project.settings.pop(key, None)
             del self.settings_before_selection
+            del self.selection_overrides
         self.analyze_button.setEnabled(True)
         self.analyze_button.setText("Продолжить анализ")
         self.pause_button.setEnabled(False)
@@ -1036,6 +1150,7 @@ class MainWindow(QMainWindow):
             "Расшифровка, правки, свидетельства, исходник и готовые клипы сохранятся.") == QMessageBox.StandardButton.Yes:
             protected = {Path(j.destination).resolve() for j in self.project.jobs
                          if not j.destination.endswith("preview.mp4")}
+            protected.add(Path(self.project.source).resolve())
             for path in files:
                 if path.resolve() not in protected:
                     path.unlink(missing_ok=True)
@@ -1072,8 +1187,8 @@ class MainWindow(QMainWindow):
             folder = self.project.settings.get("export_dir")
             if not folder:
                 return False
-        if len(clip.spans) != 1:
-            self.error("Составной экспорт ещё не подключён")
+        if len(clip.spans) > 1 and self.export_mode.currentText() == "быстрый":
+            self.error("Для составного клипа выберите точный экспорт")
             return False
         safe = lambda s: re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", s).strip(" .")[:140]
         name = self.project.settings.get("export_template", "{project}_{time}_{title}")
@@ -1131,7 +1246,7 @@ class MainWindow(QMainWindow):
         job = next(j for j in self.project.jobs if j.id == identity)
         job.state, job.error = state, error
         clip = next((c for c in self.project.clips if c.id == job.clip.id), None)
-        if clip:
+        if clip and clip.spans == job.clip.spans and clip.title == job.clip.title and clip.status != "отклонён":
             clip.status = state if state != "отменён" else "оставлен"
         self.save()
         self.refresh_clips()
@@ -1273,7 +1388,9 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 self.statusBar().showMessage("Завершается подготовка таймлайна… повторите закрытие через несколько секунд")
                 return
-        self.save()
+        if not self.save():
+            event.ignore()
+            return
         self.preferences.setValue("geometry", self.saveGeometry())
         self.preferences.setValue("panels", self.splitter.saveState())
         if self.player:

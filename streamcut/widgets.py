@@ -113,6 +113,7 @@ class Timeline(QWidget):
         self.end = 1.0
         self.window = 120.0
         self.clips = []
+        self.selection_spans = []
         self.coverage = []
         self.peaks = []
         self.thumbnails = []
@@ -159,8 +160,11 @@ class Timeline(QWidget):
                 x = self.x(stamp)
                 p.drawLine(int(x), 96-int(peak*11), int(x), 96+int(peak*11))
         x1, x2 = self.x(self.start), self.x(self.end)
-        p.fillRect(QRectF(max(10, x1), 20, max(0, min(self.width()-10, x2)-max(10, x1)),
-                         self.height()-22), QColor(64, 128, 255, 35))
+        selections = [(self.start, self.end)] if len(self.selection_spans) <= 1 else [(s.start, s.end) for s in self.selection_spans]
+        for first, last in selections:
+            left, right = max(10, self.x(first)), min(self.width()-10, self.x(last))
+            if right > left:
+                p.fillRect(QRectF(left, 20, right-left, self.height()-22), QColor(64, 128, 255, 35))
         for x in (x1, x2):
             if 0 <= x <= self.width():
                 p.fillRect(QRectF(x-3, 19, 6, self.height()-21), QColor("#568eff"))

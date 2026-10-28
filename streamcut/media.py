@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -50,6 +51,8 @@ def probe(path: str) -> dict:
             # Matroska's DURATION tag is an end timestamp and includes muxed timestamp offsets.
             durations.append(parse_time(stream["tags"]["DURATION"])-origin)
     duration = max(durations) if durations else float(data["format"].get("duration", 0))
+    if duration <= 0:
+        raise ValueError("Не удалось определить длительность записи. Выберите корректный видеофайл с известной длительностью")
     return {"duration": duration, "source_start": origin,
             "width": video["width"], "height": video["height"], "fps": fps or 25,
             "audio_tracks": [{"index": s["index"], "label": s.get("tags", {}).get("title", ""),
@@ -109,6 +112,8 @@ def video_filter(options) -> str:
 
 
 def export_clip(job: ExportJob, cancel: threading.Event, progress):
+    if len(job.clip.spans) > 1:
+        return export_composite(job, cancel, progress)
     if fingerprint(job.source) != job.fingerprint:
         raise ValueError("Исходник изменился. Переподключите его перед экспортом")
     target = Path(job.destination)
@@ -182,3 +187,59 @@ def export_clip(job: ExportJob, cancel: threading.Event, progress):
         srt.unlink(missing_ok=True)
         if "log" in locals():
             log.unlink(missing_ok=True)
+
+
+def export_composite(job: ExportJob, cancel: threading.Event, progress):
+    if job.options.mode == "быстрый":
+        raise ValueError("Для составного клипа выберите точный экспорт")
+    target = Path(job.destination)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        raise FileExistsError("Файл уже существует: "+str(target))
+    if shutil.disk_usage(target.parent).free < max(64*1024**2, job.clip.duration*2_000_000):
+        raise OSError("Недостаточно места для временных фрагментов и готового клипа")
+    with tempfile.TemporaryDirectory(prefix=f".streamcut-{job.id}-", dir=target.parent) as temporary:
+        folder = Path(temporary)
+        count = len(job.clip.spans)
+        shifted = []
+        offset = 0.0
+        for i, span in enumerate(job.clip.spans):
+            if cancel.is_set():
+                raise InterruptedError("Экспорт отменён")
+            part = job.model_copy(deep=True)
+            part.id += f"-{i}"
+            part.clip.spans = [span.model_copy()]
+            part.options.sidecar = False
+            part.destination = str(folder/f"part-{i:06}.mp4")
+            export_clip(part, cancel, lambda p, index=i: progress(0.9*(index+p)/count))
+            duration = probe(part.destination)["duration"]
+            for segment in job.segments:
+                if segment.end > span.start and segment.start < span.end:
+                    a = max(0, segment.start-span.start)
+                    b = min(duration, span.duration, segment.end-span.start)
+                    if b > a:
+                        shifted.append(Segment(start=offset+a, end=offset+b, text=segment.text))
+            offset += duration
+        listing = folder/"parts.txt"
+        listing.write_text("\n".join(f"file 'part-{i:06}.mp4'" for i in range(count)), encoding="utf-8")
+        output = folder/"assembled.mp4"
+        args = [executable("ffmpeg"), "-nostdin", "-y", "-f", "concat", "-safe", "1", "-i", str(listing),
+                "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", "-c:a", "aac",
+                "-af", "aresample=async=1:first_pts=0", "-movflags", "+faststart", str(output)]
+        with (folder/"concat.log").open("w+", encoding="utf-8") as log:
+            process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=log, creationflags=NO_WINDOW)
+            while process.poll() is None:
+                if cancel.wait(0.15):
+                    process.terminate()
+                    process.wait(timeout=10)
+                    raise InterruptedError("Экспорт отменён")
+            if process.returncode:
+                log.seek(0)
+                raise RuntimeError(log.read()[-2500:])
+        if target.exists():
+            raise FileExistsError("Имя занято во время экспорта")
+        output.rename(target)
+        srt = subtitles(shifted, 0, offset)
+        if job.options.sidecar and srt and not target.with_suffix(".srt").exists():
+            target.with_suffix(".srt").write_text(srt, encoding="utf-8")
+        progress(1)
