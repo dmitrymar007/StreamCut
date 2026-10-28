@@ -1,12 +1,12 @@
 import json
 import sys
 import threading
-import wave
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QThread, Signal
 
-from .media import ROOT, export_clip, extract_audio, extract_frame
+from .media import ROOT, export_clip
+from .preview_cache import PreviewCache, preview_plan
 
 
 class WorkerProcess(QObject):
@@ -106,34 +106,32 @@ class FunctionThread(QThread):
 
 
 class PreviewThread(QThread):
-    ready = Signal(list, list)
+    frameReady = Signal(float, float, bytes)
+    waveReady = Signal(int, list)
+    failed = Signal(str)
 
-    def __init__(self, source, audio, start, end, folder):
+    def __init__(self, source, audio, start, end, folder, identity, duration, pixels, position):
         super().__init__()
         self.source, self.audio = source, audio
         self.start_at, self.end_at, self.folder = start, end, Path(folder)
+        self.identity, self.duration, self.pixels, self.position = identity, duration, pixels, position
+        self.cancel = threading.Event()
 
     def run(self):
         try:
-            import numpy as np
-            duration = self.end_at-self.start_at
-            audio = self.folder / "preview.wav"
-            peaks = []
-            if self.audio >= 0:
-                extract_audio(self.source, self.audio, self.start_at, duration, audio)
-                with wave.open(str(audio)) as f:
-                    data = np.frombuffer(f.readframes(f.getnframes()), dtype=np.int16)
-                groups = np.array_split(data, min(700, len(data)))
-                peaks = [(self.start_at+i*duration/len(groups), float(np.max(np.abs(g.astype(float))))/32768)
-                         for i, g in enumerate(groups) if len(g)]
-                audio.unlink(missing_ok=True)
-            frames = []
-            for i in range(6):
-                stamp = self.start_at+duration*i/6
-                path = self.folder / f"preview-{i}.jpg"
-                extract_frame(self.source, stamp, path)
-                frames.append((stamp, path.read_bytes()))
-            self.ready.emit(peaks, frames)
-        except Exception:
-            # Preview failure never blocks playback or exports.
-            self.ready.emit([], [])
+            cache = PreviewCache(self.folder, self.source, self.identity, self.audio, self.duration)
+            step, frames, chunks = preview_plan(self.start_at, self.end_at, self.duration, self.pixels, self.position)
+            for index in range(max(len(frames), len(chunks) if self.audio >= 0 else 0)):
+                if self.cancel.is_set():
+                    return
+                if index < len(frames):
+                    stamp = frames[index]
+                    self.frameReady.emit(stamp, step, cache.frame(stamp, self.cancel))
+                if self.audio >= 0 and index < len(chunks):
+                    chunk = chunks[index]
+                    self.waveReady.emit(chunk, cache.waveform(chunk, self.cancel))
+        except InterruptedError:
+            pass
+        except Exception as exc:
+            # Keep already displayed data on extraction failure.
+            self.failed.emit(str(exc))

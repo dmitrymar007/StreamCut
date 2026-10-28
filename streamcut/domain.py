@@ -91,12 +91,12 @@ class Clip(BaseModel):
 class ExportOptions(BaseModel):
     mode: str = "точный"
     layout: str = "исходный"
-    crf: int = Field(default=20, ge=15, le=35)
-    height: int = 1080
+    crf: int = Field(default=18, ge=0, le=35)
+    height: int = Field(default=0, ge=0)
     crop_x: float = Field(default=0.5, ge=0, le=1)
     crop_y: float = Field(default=0.5, ge=0, le=1)
     volume: float = Field(default=1, ge=0, le=3)
-    fade: float = Field(default=0.1, ge=0, le=2)
+    fade: float = Field(default=0, ge=0, le=2)
     subtitles: bool = False
     sidecar: bool = True
     webcam_x: float = Field(default=0, ge=0, le=1)
@@ -116,6 +116,7 @@ class ExportJob(BaseModel):
     destination: str
     state: str = "ожидает"
     progress: float = 0
+    preview: bool = False
     error: str = ""
 
 
@@ -133,6 +134,7 @@ class Project(BaseModel):
     audio_tracks: list[dict] = Field(default_factory=list)
     audio: int = 0
     clips: list[Clip] = Field(default_factory=list)
+    deleted_clips: list[dict] = Field(default_factory=list)
     segments: list[Segment] = Field(default_factory=list)
     checkpoints: dict[str, list[str]] = Field(default_factory=dict)
     coverage: list[Span] = Field(default_factory=list)
@@ -183,3 +185,35 @@ def remove_range(spans: list[Span], cut: Span) -> list[Span]:
     if not result:
         raise ValueError("Нельзя удалить все фрагменты клипа")
     return result
+
+
+def output_dimensions(options: ExportOptions, width: int, height: int) -> tuple[int, int]:
+    if options.layout == "исходный":
+        if not options.height:
+            return width, height
+        target = min(options.height, height)
+        return max(2, round(width*target/height/2)*2), max(2, round(target/2)*2)
+    if options.layout in ("9:16", "размытый фон", "вебкамера + игра"):
+        if options.height:
+            return max(2, round(options.height*9/16/2)*2), options.height
+        # Preserve the source's short edge: Full HD becomes 1080 x 1920.
+        short = min(width, height)
+        return max(2, short//2*2), max(2, round(short*16/9/2)*2)
+    if options.layout == "1:1":
+        side = options.height or min(width, height)
+        return max(2, side//2*2), max(2, side//2*2)
+    target = options.height or min(width, height)
+    return max(2, round(target*16/9/2)*2), max(2, target//2*2)
+
+
+def candidate_was_deleted(project: Project, clip: Clip) -> bool:
+    for data in project.deleted_clips:
+        evidence = set(data.get("evidence", []))
+        if not evidence or not (evidence & set(clip.evidence)):
+            continue
+        spans = data["spans"]
+        start, end = spans[0]["start"], spans[-1]["end"]
+        intersection = max(0, min(end, clip.end)-max(start, clip.start))
+        if intersection/max(0.001, max(end, clip.end)-min(start, clip.start)) > 0.7:
+            return True
+    return False

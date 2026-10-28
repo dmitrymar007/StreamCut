@@ -9,7 +9,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-from .domain import ExportJob, Segment, fingerprint, parse_time, timecode
+from .domain import ExportJob, Segment, fingerprint, output_dimensions, parse_time, timecode
 
 ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
 VENDOR = ROOT / "vendor"
@@ -84,16 +84,10 @@ def subtitles(segments: list[Segment], start: float, end: float) -> str:
     return "\n".join(lines)
 
 
-def video_filter(options) -> str:
-    h = options.height
-    if options.layout in ("9:16", "размытый фон", "вебкамера + игра"):
-        w = round(h * 9 / 16 / 2) * 2
-    elif options.layout == "1:1":
-        w = h
-    else:
-        w = round(h * 16 / 9 / 2) * 2
+def video_filter(options, source_width=1920, source_height=1080) -> str:
+    w, h = output_dimensions(options, source_width, source_height)
     if options.layout == "исходный":
-        return f"scale=-2:'min({h},ih)'"
+        return "null" if not options.height else f"scale={w}:{h}"
     if options.layout == "размытый фон":
         return (f"split=2[bg][fg];[bg]scale={w}:{h}:force_original_aspect_ratio=increase,"
                 f"crop={w}:{h},boxblur=20:2[back];[fg]scale={w}:{h}:"
@@ -132,11 +126,13 @@ def export_clip(job: ExportJob, cancel: threading.Event, progress):
                 "-t", str(span.duration), "-map", "0:v:0", "-map", f"0:a:{job.audio}?",
                 "-sn", "-dn"]
         if job.options.mode == "быстрый":
-            if job.options.layout != "исходный" or job.options.subtitles:
-                raise ValueError("Быстрый режим не поддерживает кадрирование и прожиг субтитров")
+            if (job.options.layout != "исходный" or job.options.subtitles or job.options.height or
+                    job.options.volume != 1 or job.options.fade):
+                raise ValueError("Для обработки изображения или звука нужен точный режим")
             args += ["-c", "copy", "-avoid_negative_ts", "make_zero"]
         else:
-            filters = video_filter(job.options)
+            source_meta = probe(job.source)
+            filters = video_filter(job.options, source_meta["width"], source_meta["height"])
             if job.options.subtitles and srt_text:
                 srt.write_text(srt_text, encoding="utf-8")
                 escaped = srt.as_posix().replace(":", "\\:").replace("'", "\\'")

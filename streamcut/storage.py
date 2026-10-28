@@ -35,6 +35,11 @@ class ProjectStore:
             raise ValueError("Неподдерживаемая версия проекта")
         project = Project.model_validate(data)
         for job in project.jobs:
+            if (project.settings.get("export_defaults_version", 0) < 2 and job.options.mode == "быстрый" and
+                    job.options.layout == "исходный" and not job.options.subtitles and
+                    job.state in ("выполняется", "ожидает", "ошибка экспорта", "отменён")):
+                # v0.1 stream-copy deliberately ignored these processing fields.
+                job.options.height, job.options.volume, job.options.fade = 0, 1, 0
             if job.state == "выполняется":
                 job.state = "ожидает"
                 job.progress = 0
