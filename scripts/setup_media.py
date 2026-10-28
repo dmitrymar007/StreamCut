@@ -2,6 +2,7 @@
 import hashlib
 import json
 import shutil
+import subprocess
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -15,8 +16,6 @@ def get(url):
 
 
 def install():
-    import py7zr
-
     VENDOR.mkdir(exist_ok=True)
     manifest = []
     releases = [
@@ -41,8 +40,13 @@ def install():
             with zipfile.ZipFile(archive) as z:
                 z.extractall(unpack)
         else:
-            with py7zr.SevenZipFile(archive) as z:
-                z.extractall(unpack)
+            # Upstream mpv uses BCJ2, which Python's py7zr cannot decompress.
+            seven = VENDOR / "7zr.exe"
+            if not seven.exists():
+                with get("https://www.7-zip.org/a/7zr.exe") as src, seven.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+            subprocess.run([str(seven), "x", "-y", f"-o{unpack}", str(archive)], check=True,
+                           stdout=subprocess.DEVNULL)
         for pattern in ("ffmpeg.exe", "ffprobe.exe", "libmpv-2.dll", "mpv-2.dll"):
             for file in unpack.rglob(pattern):
                 shutil.copy2(file, VENDOR / file.name)
