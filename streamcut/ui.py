@@ -504,7 +504,7 @@ class MainWindow(QMainWindow):
         edit.addAction("Повторный визуальный анализ выделения", self.analyze_selection)
         help_menu = self.menuBar().addMenu("Справка")
         help_menu.addAction("О программе", lambda: QMessageBox.information(self, "StreamCut",
-            "StreamCut 0.1 · Windows / CPU\nI/O — границы · Space — пауза · ←/→ — 5 секунд\n"
+            "StreamCut 0.2 · Windows / CPU\nI/O — границы · Space — пауза · ←/→ — 5 секунд\n"
             "Ctrl+Enter — экспорт и далее · Ctrl+Z / Ctrl+Shift+Z — отмена/повтор\n"
             "Результаты моделей требуют проверки. Быстрый экспорт зависит от ключевых кадров.\n"
             "Покадровый шаг назад зависит от формата. Визуальный анализ проверяет выбранные кадры, не каждую секунду."))
@@ -524,7 +524,7 @@ class MainWindow(QMainWindow):
             self.shortcuts.append(shortcut)
 
     def configure_shortcuts(self):
-        key, ok = QInputDialog.getItem(self, "Горячие клавиши", "Действие", ["play", "in", "out", "back", "forward", "export", "undo", "redo"], editable=False)
+        key, ok = QInputDialog.getItem(self, "Горячие клавиши", "Действие", ["play", "in", "out", "back", "forward", "export", "undo", "redo", "delete"], editable=False)
         if ok:
             value, accepted = QInputDialog.getText(self, "Сочетание", "Например: Ctrl+I", text=str(self.preferences.value("key/"+key, "")))
             if accepted and value:

@@ -402,5 +402,3 @@ class Timeline(QWidget):
         if not self.overview:
             self.zoom_by(0.8 if event.angleDelta().y() > 0 else 1.25, event.position().x())
         event.accept()
-
-

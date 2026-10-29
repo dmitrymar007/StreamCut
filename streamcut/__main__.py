@@ -34,21 +34,35 @@ def main():
             QTimer.singleShot(100, lambda: window.open_source(sys.argv[1]))
     if "--smoke-output" in sys.argv:
         import json
+        import time
         from pathlib import Path
 
         from PySide6.QtCore import QTimer
+
+        from . import __version__
+        from .domain import output_dimensions
         output = Path(sys.argv[sys.argv.index("--smoke-output")+1])
         output.mkdir(parents=True, exist_ok=True)
         errors = []
         window.error = lambda error: errors.append(str(error))
-        QTimer.singleShot(250, window.preview_timer.stop)
+        started = time.monotonic()
         def report():
+            if (time.monotonic()-started < 15 and not errors and
+                    (not window.timeline._frames or (window.project.audio_tracks and not window.timeline._waves))):
+                QTimer.singleShot(250, report)
+                return
             result = {"window_visible": window.isVisible(), "player_loaded": bool(window.player),
                       "source_valid": window.source_valid, "position": window.position,
-                      "duration": window.project.duration, "errors": errors}
+                      "duration": window.project.duration, "errors": errors, "version": __version__,
+                      "timeline_frames": len(window.timeline._frames), "wave_chunks": len(window.timeline._waves),
+                      "output_dimensions": output_dimensions(window.export_options(),
+                                                              window.project.width, window.project.height)}
             try:
                 assert window.isVisible() and window.player and window.source_valid and not errors
                 assert window.player.time_pos is not None
+                assert window.timeline._frames
+                if window.project.audio_tracks:
+                    assert window.timeline._waves
                 if window.current():
                     assert abs(window.player.time_pos-window.current().start) < 0.2
                 window.player.command("screenshot-to-file", str((output/"frame.jpg").resolve()), "video")
