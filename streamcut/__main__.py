@@ -30,8 +30,11 @@ def main():
         from PySide6.QtCore import QTimer
         if sys.argv[1] == "--project" and len(sys.argv) > 2:
             QTimer.singleShot(100, lambda: window.open_project(sys.argv[2]))
-        else:
+        elif sys.argv[1] != "--setup":
             QTimer.singleShot(100, lambda: window.open_source(sys.argv[1]))
+    if "--smoke-output" not in sys.argv and ("--setup" in sys.argv or not window.preferences.value("setup_seen", False, type=bool)):
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(500, window.prepare_models)
     if "--smoke-output" in sys.argv:
         import json
         import time

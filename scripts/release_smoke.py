@@ -1,11 +1,13 @@
 """Verify the packaged GUI in both formats without changing the user's project."""
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 from PySide6.QtCore import QSettings
 
+from streamcut import __version__
 from streamcut.dialogs import default_settings
 from streamcut.domain import Clip, ExportOptions, Project, Span, output_dimensions
 from streamcut.media import executable, probe, run
@@ -18,7 +20,8 @@ def main():
     assert executable_path.is_file(), executable_path
     metadata = probe(source)
     assert metadata["duration"] > 223, "Use a source longer than four minutes"
-    root = Path("local/release-editor-02").resolve()
+    root = Path("local/release-smoke")/__version__
+    root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     preferences = QSettings("StreamCut", "StreamCut")
     keys = ("recent_project", "geometry", "panels")
@@ -35,8 +38,14 @@ def main():
             output = root/name/"diagnostics"
             output.mkdir(parents=True, exist_ok=True)
             (output/"gui.json").unlink(missing_ok=True)
+            environment = os.environ.copy()
+            if os.name == "nt":
+                windows = Path(os.environ["SystemRoot"])
+                environment["PATH"] = str(windows/"System32")+os.pathsep+str(windows)
+                environment.pop("PYTHONPATH", None)
+                environment.pop("PYTHONHOME", None)
             completed = subprocess.run([str(executable_path), "--project", str(store.folder),
-                                        "--smoke-output", str(output)], timeout=40)
+                                        "--smoke-output", str(output)], timeout=40, env=environment)
             assert completed.returncode == 0, (name, completed.returncode)
             result = json.loads((output/"gui.json").read_text(encoding="utf-8"))
             assert result["passed"] and not result["errors"], result

@@ -1,6 +1,5 @@
 from pathlib import Path
 
-from PySide6.QtCore import QStandardPaths
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -23,12 +22,13 @@ from .tasks import FunctionThread, WorkerProcess
 
 
 def default_settings():
-    folder = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation))
+    from .paths import data_root
+    folder = data_root()
     from .media import ROOT
     model_folder = ROOT / "models" if (ROOT / "models").exists() else folder / "models"
     return {"ollama_url": "http://127.0.0.1:11434", "text_model": "qwen3.5:4b",
             "vision_model": "qwen3.5:4b", "whisper_model": "small", "language": "ru",
-            "models_dir": str(model_folder), "threads": 4, "performance": "Сбалансированный", "visual": "выключен",
+            "models_dir": str(model_folder), "whisper_device": "auto", "threads": 4, "performance": "Сбалансированный", "visual": "выключен",
             "frame_interval": 30, "transcribe": True, "text_search": True,
             "export_template": "{project}_{time}_{title}",
             "criteria": "Забавные диалоги, неожиданные реакции, законченные истории, полезные объяснения. "
@@ -42,12 +42,17 @@ class AnalysisDialog(QDialog):
         self.resize(560, 540)
         self.settings = default_settings() | settings
         layout = QVBoxLayout(self)
-        info = QLabel("Один тяжёлый этап за раз · CPU · результаты сохраняются по блокам")
+        info = QLabel("Один тяжёлый этап за раз · NVIDIA / CPU · результаты сохраняются по блокам")
         info.setWordWrap(True)
         layout.addWidget(info)
         form = QFormLayout()
         layout.addLayout(form)
         self.fields = {}
+        self.device = QComboBox()
+        for label, value in [("Авто: NVIDIA CUDA, иначе CPU", "auto"), ("Только CPU", "cpu"), ("NVIDIA CUDA (обязательно)", "cuda")]:
+            self.device.addItem(label, value)
+        self.device.setCurrentIndex(max(0, self.device.findData(self.settings.get("whisper_device", "auto"))))
+        form.addRow("Распознавание речи", self.device)
         for key, label in [("ollama_url", "Адрес Ollama"), ("text_model", "Текстовая модель"),
                            ("vision_model", "Модель изображения"), ("dictionary", "Имена и термины"),
                            ("export_template", "Имя: {project}, {time}, {title}")]:
@@ -96,6 +101,7 @@ class AnalysisDialog(QDialog):
             result[key] = field.currentText() if isinstance(field, QComboBox) else field.text().strip()
         result["language"] = None if result["language"] == "авто" else "ru"
         result.update(threads=self.threads.value(), frame_interval=int(self.interval.currentText()),
+                      whisper_device=self.device.currentData(),
                       performance=self.performance.currentText(),
                       transcribe=self.asr.isChecked(), text_search=self.text.isChecked(),
                       criteria=self.criteria.toPlainText())
@@ -109,6 +115,9 @@ class ModelsDialog(QDialog):
         self.setWindowTitle("Локальные модели")
         self.resize(610, 500)
         layout = QVBoxLayout(self)
+        automatic = QPushButton("Автоматическая подготовка Ollama, Whisper и NVIDIA…")
+        automatic.clicked.connect(self.prepare_all)
+        layout.addWidget(automatic)
         form = QFormLayout()
         self.url = QLineEdit(settings["ollama_url"])
         self.model = QComboBox()
@@ -178,6 +187,17 @@ class ModelsDialog(QDialog):
         self.lookup.finished.connect(self.lookup_finished)
         self.lookup.start()
 
+    def prepare_all(self):
+        if self.worker.running() or self.lookup:
+            return
+        from .setup_dialog import SetupDialog
+        dialog = SetupDialog(self.settings, self)
+        dialog.exec()
+        self.url.setText(self.settings["ollama_url"])
+        self.folder.setText(self.settings["models_dir"])
+        self.model.setCurrentText(self.settings["text_model"])
+        dialog.deleteLater()
+
     def lookup_finished(self):
         self.lookup.deleteLater()
         self.lookup = None
@@ -244,7 +264,7 @@ class ModelsDialog(QDialog):
             if not path:
                 return
             args = [mode, path, "--model", self.settings.get("whisper_model", "small") if mode == "test-asr" else self.model.currentText(),
-                    "--url", self.url.text(), "--folder", self.folder.text()]
+                    "--url", self.url.text(), "--folder", self.folder.text(), "--device", self.settings.get("whisper_device", "auto")]
         self.output.appendPlainText("Локальный тест выполняется…")
         self.progress.setRange(0, 0)
         self.worker.start(args)

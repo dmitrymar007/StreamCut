@@ -9,6 +9,7 @@ import time
 from collections import deque
 from pathlib import Path
 
+from .acceleration import WhisperEngine, hardware_info
 from .domain import Clip, Project, Segment, Span, fingerprint
 from .media import extract_audio, extract_frame
 from .ollama import Ollama
@@ -47,13 +48,10 @@ def analyze(snapshot, folder):
             settings.get("dictionary", "")]
     segments = list(project.segments)
     if settings.get("transcribe", True):
-        from faster_whisper import WhisperModel
-
-        emit("status", text="Загрузка Whisper · CPU INT8")
+        emit("status", text="Загрузка Whisper · выбор NVIDIA / CPU")
         # Explicit local-only loading: download models separately from the Models dialog.
         try:
-            model = WhisperModel(asr_model, device="cpu", compute_type="int8", cpu_threads=threads,
-                                 download_root=settings["models_dir"], local_files_only=True)
+            model = WhisperEngine(settings, emit)
         except (OSError, ValueError) as exc:
             raise RuntimeError(f"Whisper {asr_model} не подготовлен. Откройте «Модели» и скачайте его. {exc}") from exc
         starts = range(0, int(project.duration + 0.999), 300)
@@ -69,7 +67,7 @@ def analyze(snapshot, folder):
             audio = folder / "audio.wav"
             try:
                 extract_audio(project.source, project.audio, start, duration, audio)
-                result, _ = model.transcribe(str(audio), language=settings.get("language") or None,
+                result = model.transcribe(str(audio), language=settings.get("language") or None,
                                             task="transcribe", vad_filter=True, word_timestamps=True,
                                             condition_on_previous_text=False, beam_size=3,
                                             initial_prompt=settings.get("dictionary", ""),
@@ -95,9 +93,12 @@ def analyze(snapshot, folder):
                      progress=min(1, (start + duration) / project.duration))
             finally:
                 audio.unlink(missing_ok=True)
+        model.close()
         del model
         gc.collect()
     if settings.get("text_search", True):
+        from .bootstrap import start_ollama
+        start_ollama(settings.get("ollama_url", "http://127.0.0.1:11434"))
         revision = client.revision(model_name)
         emit("model", name=model_name, revision=revision)
         segments.sort(key=lambda s: s.start)
@@ -142,6 +143,8 @@ def analyze(snapshot, folder):
         client.release(model_name)
     visual = settings.get("visual", "выключен")
     if visual != "выключен":
+        from .bootstrap import start_ollama
+        start_ollama(settings.get("ollama_url", "http://127.0.0.1:11434"))
         visual_model = settings.get("vision_model", model_name)
         if "vision" not in client.show(visual_model).get("capabilities", []):
             raise ValueError("Выбранная модель не поддерживает изображения")
@@ -226,14 +229,21 @@ def main():
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=["analyze", "pull", "whisper", "test-text", "test-asr", "test-image"])
+    parser.add_argument("mode", choices=["analyze", "pull", "whisper", "test-text", "test-asr", "test-image", "prepare", "hardware"])
     parser.add_argument("value")
     parser.add_argument("--folder", default=".")
     parser.add_argument("--url", default="http://127.0.0.1:11434")
     parser.add_argument("--model", default="qwen3.5:4b")
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     args = parser.parse_args()
     try:
-        if args.mode == "analyze":
+        if args.mode == "prepare":
+            from .bootstrap import prepare
+            prepare(json.loads(Path(args.value).read_text(encoding="utf-8")), emit)
+        elif args.mode == "hardware":
+            info = hardware_info()
+            emit("done", text=json.dumps(info, ensure_ascii=False), result=info)
+        elif args.mode == "analyze":
             analyze(Path(args.value), Path(args.folder))
         elif args.mode == "pull":
             import httpx
@@ -275,14 +285,16 @@ def main():
         else:
             import tempfile
 
-            from faster_whisper import WhisperModel
             with tempfile.TemporaryDirectory(prefix="streamcut-test-") as temporary:
                 audio = Path(temporary)/"sample.wav"
                 extract_audio(args.value, 0, 0, 30, audio)
-                model = WhisperModel(args.model, device="cpu", compute_type="int8", cpu_threads=4,
-                                     download_root=args.folder, local_files_only=True)
-                segments, _ = model.transcribe(str(audio), language="ru", vad_filter=True, task="transcribe")
-                emit("done", text="Первые 30 секунд: "+" ".join(s.text for s in segments))
+                model = WhisperEngine({"whisper_model": args.model, "models_dir": args.folder,
+                                       "whisper_device": args.device, "threads": 4}, emit)
+                try:
+                    segments = model.transcribe(str(audio), language="ru", vad_filter=True, task="transcribe")
+                    emit("done", text="Первые 30 секунд: "+" ".join(s.text for s in segments), device=model.device)
+                finally:
+                    model.close()
     except Exception as exc:
         emit("error", text=f"{type(exc).__name__}: {exc}")
         sys.exit(1)

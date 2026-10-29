@@ -89,7 +89,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("StreamCut 0.2 · редактор видео")
+        self.setWindowTitle("StreamCut 0.3 · редактор видео")
         self.setWindowIcon(QIcon(str(ROOT/"assets"/"streamcut.ico")))
         self.resize(1360, 900)
         self.setMinimumSize(1050, 710)
@@ -503,8 +503,9 @@ class MainWindow(QMainWindow):
         edit.addAction("Горячие клавиши…", self.configure_shortcuts)
         edit.addAction("Повторный визуальный анализ выделения", self.analyze_selection)
         help_menu = self.menuBar().addMenu("Справка")
+        help_menu.addAction("Подготовка нейросетей…", self.prepare_models)
         help_menu.addAction("О программе", lambda: QMessageBox.information(self, "StreamCut",
-            "StreamCut 0.2 · Windows / CPU\nI/O — границы · Space — пауза · ←/→ — 5 секунд\n"
+            "StreamCut 0.3 · Windows / NVIDIA / CPU\nI/O — границы · Space — пауза · ←/→ — 5 секунд\n"
             "Ctrl+Enter — экспорт и далее · Ctrl+Z / Ctrl+Shift+Z — отмена/повтор\n"
             "Результаты моделей требуют проверки. Быстрый экспорт зависит от ключевых кадров.\n"
             "Покадровый шаг назад зависит от формата. Визуальный анализ проверяет выбранные кадры, не каждую секунду."))
@@ -1253,6 +1254,19 @@ class MainWindow(QMainWindow):
             return self.error("Остановите анализ перед загрузкой или выгрузкой моделей")
         dialog = ModelsDialog(self.project.settings, self)
         dialog.exec()
+        self.remember_settings()
+        self.save()
+        dialog.deleteLater()
+
+    def prepare_models(self):
+        if self.worker.running():
+            return self.error("Дождитесь завершения анализа или остановите его перед подготовкой моделей")
+        from .setup_dialog import SetupDialog
+        dialog = SetupDialog(self.project.settings, self)
+        dialog.exec()
+        if dialog.success:
+            self.preferences.setValue("setup_complete", True)
+        self.preferences.setValue("setup_seen", True)
         self.remember_settings()
         self.save()
         dialog.deleteLater()

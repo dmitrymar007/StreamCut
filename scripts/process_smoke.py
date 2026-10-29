@@ -11,7 +11,7 @@ worker = WorkerProcess()
 events = []
 stage = 0
 worker.event.connect(events.append)
-helper = str(Path("dist/StreamCut/StreamCut-worker.exe").resolve())
+helper = str(Path(sys.argv[2] if len(sys.argv) > 2 else "dist/StreamCut/StreamCut-worker.exe").resolve())
 
 
 def finished():
