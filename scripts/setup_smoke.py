@@ -17,7 +17,7 @@ from streamcut.widgets import THEME
 locale.setlocale(locale.LC_NUMERIC, "C")
 folder = Path("local/setup-smoke").resolve()
 folder.mkdir(parents=True, exist_ok=True)
-os.environ["STREAMCUT_DATA_DIR"] = str(folder/"data")
+os.environ["STREAMCUT_DATA_DIR"] = str(Path(sys.argv[3]).resolve() if len(sys.argv) > 3 else folder/"data")
 app = QApplication(sys.argv)
 app.setOrganizationName("StreamCutTest")
 app.setApplicationName("FirstRunSmoke")
@@ -28,7 +28,7 @@ settings["models_dir"] = str(Path(sys.argv[2] if len(sys.argv) > 2 else "models"
 dialog = SetupDialog(settings)
 events = []
 dialog.worker.event.connect(events.append)
-if len(sys.argv) > 1:
+if len(sys.argv) > 1 and sys.argv[1] != "--source":
     helper = str(Path(sys.argv[1]).resolve())
     dialog.worker.start = lambda args: dialog.worker.process.start(helper, ["--worker", *args])
 dialog.show()

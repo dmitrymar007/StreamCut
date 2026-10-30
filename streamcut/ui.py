@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import __version__
 from .captions import read_captions
 from .dialogs import AnalysisDialog, ModelsDialog, default_settings
 from .domain import (
@@ -89,7 +90,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("StreamCut 0.3 · редактор видео")
+        self.setWindowTitle(f"StreamCut {__version__} · редактор видео")
         self.setWindowIcon(QIcon(str(ROOT/"assets"/"streamcut.ico")))
         self.resize(1360, 900)
         self.setMinimumSize(1050, 710)
@@ -505,7 +506,7 @@ class MainWindow(QMainWindow):
         help_menu = self.menuBar().addMenu("Справка")
         help_menu.addAction("Подготовка нейросетей…", self.prepare_models)
         help_menu.addAction("О программе", lambda: QMessageBox.information(self, "StreamCut",
-            "StreamCut 0.3 · Windows / NVIDIA / CPU\nI/O — границы · Space — пауза · ←/→ — 5 секунд\n"
+            f"StreamCut {__version__} · Windows / NVIDIA / CPU\nI/O — границы · Space — пауза · ←/→ — 5 секунд\n"
             "Ctrl+Enter — экспорт и далее · Ctrl+Z / Ctrl+Shift+Z — отмена/повтор\n"
             "Результаты моделей требуют проверки. Быстрый экспорт зависит от ключевых кадров.\n"
             "Покадровый шаг назад зависит от формата. Визуальный анализ проверяет выбранные кадры, не каждую секунду."))

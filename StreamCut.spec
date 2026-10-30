@@ -18,6 +18,7 @@ a = Analysis(
     binaries=[('vendor/ffmpeg.exe', 'vendor'), ('vendor/ffprobe.exe', 'vendor'), ('vendor/libmpv-2.dll', 'vendor')],
     datas=collect_data_files('faster_whisper') + [('assets/streamcut.ico', 'assets'),
         ('assets/nvidia-manifest.json', 'assets'), ('assets/ollama-installer.json', 'assets'),
+        ('assets/whisper-manifest.json', 'assets'),
         ('THIRD_PARTY.md', '.'), ('LICENSE', '.'), ('vendor/notices', 'third-party-notices')] + notices,
     hiddenimports=['streamcut.worker', 'faster_whisper', 'mpv'],
     excludes=['PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineQuick', 'tkinter'],

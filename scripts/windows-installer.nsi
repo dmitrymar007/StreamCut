@@ -5,10 +5,10 @@ Unicode true
 !include "FileFunc.nsh"
 
 !ifndef VERSION
-!define VERSION "0.3.0"
+!define VERSION "0.3.1"
 !endif
 !ifndef APPDIR
-!define APPDIR "..\dist\release-0.3.0\StreamCut"
+!define APPDIR "..\dist\release-${VERSION}\StreamCut"
 !endif
 !ifndef OUTPUT
 !define OUTPUT "..\release\StreamCut-Setup-${VERSION}-windows-x64.exe"

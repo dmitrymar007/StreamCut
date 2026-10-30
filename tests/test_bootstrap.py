@@ -37,12 +37,7 @@ def test_fresh_cpu_setup_installs_missing_ollama_and_models_without_cuda(tmp_pat
     monkeypatch.setattr(bootstrap, "start_ollama", lambda url: None)
     monkeypatch.setattr(bootstrap, "hardware_info", lambda: {"cuda_devices": 0})
     monkeypatch.setattr(bootstrap, "extract_cuda", lambda *a: pytest.fail("CPU must not download CUDA"))
-    import faster_whisper.utils
-    def whisper(name, **kwargs):
-        loads.append(kwargs)
-        if kwargs.get("local_files_only"):
-            raise FileNotFoundError("fresh machine")
-    monkeypatch.setattr(faster_whisper.utils, "download_model", whisper)
+    monkeypatch.setattr(bootstrap, "prepare_whisper", lambda *args: loads.append(args))
     monkeypatch.setattr(bootstrap, "WhisperEngine", lambda *a: SimpleNamespace(
         transcribe=lambda *a, **k: [], device="cpu", close=lambda: None))
     monkeypatch.setattr(bootstrap, "Ollama", lambda url: SimpleNamespace(models=lambda: [],
@@ -62,6 +57,6 @@ def test_fresh_cpu_setup_installs_missing_ollama_and_models_without_cuda(tmp_pat
                                lambda kind, **data: events.append((kind, data)))
     assert len(downloaded) == 1 and downloaded[0]["sha256"]
     assert launches[0][1:] == ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"]
-    assert len(loads) == 2 and loads[0]["local_files_only"]
+    assert len(loads) == 1 and loads[0][:2] == ("small", str(tmp_path/"models"))
     assert "/api/pull" in requests and "/api/chat" in requests
     assert result["whisper_device"] == "cpu" and events[-1][0] == "done"

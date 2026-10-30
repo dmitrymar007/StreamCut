@@ -1,8 +1,9 @@
 """First-run preparation, with one action and recoverable downloads."""
 import json
+import time
 from pathlib import Path
 
-from PySide6.QtCore import QTemporaryDir
+from PySide6.QtCore import QTemporaryDir, QTimer
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -62,6 +63,13 @@ class SetupDialog(QDialog):
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         layout.addWidget(self.progress)
+        self.activity = QLabel("Ожидание запуска")
+        self.activity.setWordWrap(True)
+        layout.addWidget(self.activity)
+        self.last_update = time.monotonic()
+        self.timer = QTimer(self)
+        self.timer.setInterval(1000)
+        self.timer.timeout.connect(self.update_activity)
         row = QHBoxLayout()
         self.start = QPushButton("Подготовить нейросети")
         self.start.setObjectName("primary")
@@ -91,9 +99,23 @@ class SetupDialog(QDialog):
         self.model.setEnabled(False)
         self.stop.setEnabled(True)
         self.finish.setEnabled(False)
+        self.progress.setValue(0)
+        self.last_update = time.monotonic()
+        self.activity.setText("Запуск подготовки…")
         self.worker.start(["prepare", str(snapshot)])
+        if self.worker.log_path:
+            self.output.appendPlainText("Журнал подготовки: "+str(self.worker.log_path))
+        self.timer.start()
+
+    def update_activity(self):
+        elapsed = int(time.monotonic()-self.last_update)
+        if elapsed >= 5:
+            self.activity.setText(f"Ожидание следующего обновления: {elapsed} с. "
+                                 "При сетевой ошибке загрузка повторится автоматически; можно остановить и продолжить позже.")
 
     def on_event(self, event):
+        self.last_update = time.monotonic()
+        self.activity.setText("Подготовка выполняется…")
         text = event.get("text")
         if text:
             # Keep the log bounded even on many gigabytes of layer progress.
@@ -116,6 +138,8 @@ class SetupDialog(QDialog):
             self.output.appendPlainText("Исправьте причину и повторите. Завершённые загрузки сохраняются.")
 
     def finished_task(self):
+        self.timer.stop()
+        self.activity.setText("Подготовка завершена" if self.success else "Подготовка не завершена; доступен повтор")
         self.stop.setEnabled(False)
         self.finish.setEnabled(True)
         self.device.setEnabled(True)

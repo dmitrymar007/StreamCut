@@ -1,11 +1,13 @@
 import json
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QThread, Signal
 
 from .media import ROOT, export_clip
+from .paths import data_root
 from .preview_cache import PreviewCache, preview_plan
 
 
@@ -24,6 +26,16 @@ class WorkerProcess(QObject):
         self.buffer = b""
         self.stderr = ""
         self.had_terminal = False
+        self.log_path = None
+        self.cancelled = False
+
+    def log(self, text):
+        if self.log_path is not None:
+            try:
+                with self.log_path.open("a", encoding="utf-8") as output:
+                    output.write(text)
+            except OSError:
+                pass
 
     def process_error(self, error):
         if error == QProcess.ProcessError.FailedToStart:
@@ -35,6 +47,13 @@ class WorkerProcess(QObject):
         self.buffer = b""
         self.stderr = ""
         self.had_terminal = False
+        self.cancelled = False
+        self.log_path = data_root()/"logs"/("worker-"+args[0]+".log")
+        try:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            self.log_path.write_text(datetime.now().isoformat()+"\n", encoding="utf-8")
+        except OSError:
+            self.log_path = None
         if getattr(sys, "frozen", False):
             helper = str(Path(sys.executable).with_name("StreamCut-worker.exe"))
             self.process.start(helper, ["--worker", *args])
@@ -45,6 +64,7 @@ class WorkerProcess(QObject):
         self.buffer += bytes(self.process.readAllStandardOutput())
         while b"\n" in self.buffer:
             line, self.buffer = self.buffer.split(b"\n", 1)
+            self.log(line.decode("utf-8", "replace")+"\n")
             try:
                 event = json.loads(line.decode("utf-8"))
                 if event.get("kind") in ("done", "error"):
@@ -54,19 +74,25 @@ class WorkerProcess(QObject):
                 continue
 
     def read_error(self):
-        self.stderr = (self.stderr + bytes(self.process.readAllStandardError()).decode("utf-8", "replace"))[-5000:]
+        text = bytes(self.process.readAllStandardError()).decode("utf-8", "replace")
+        self.log(text)
+        self.stderr = (self.stderr + text)[-5000:]
 
     def end(self, code, status):
         self.read()
         self.read_error()
-        if code and not self.had_terminal:
-            self.event.emit({"kind": "error", "text": self.stderr or "Задача прервана; завершённые блоки сохранены"})
+        if not self.had_terminal and not self.cancelled:
+            text = self.stderr or f"Задача завершилась без результата (код {code}); повторите подготовку или анализ"
+            if self.log_path:
+                text += "\nЖурнал: "+str(self.log_path)
+            self.event.emit({"kind": "error", "text": text})
         self.finished.emit()
 
     def running(self):
         return self.process.state() != QProcess.ProcessState.NotRunning
 
     def stop(self):
+        self.cancelled = True
         self.process.kill()
         self.process.waitForFinished(3000)
 

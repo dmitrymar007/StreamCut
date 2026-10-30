@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 from .paths import cuda_folder
+from .whisper_models import model_path
 
 _dll_handles = []
 _cuda_libraries = []
@@ -79,7 +80,8 @@ class WhisperEngine:
             types = self.backend.get_supported_compute_types("cuda")
             compute = next((t for t in ("float16", "int8_float16", "float32") if t in types), "float32")
         self.emit("status", text=f"Whisper · {'NVIDIA CUDA' if self.device == 'cuda' else 'CPU'} · {compute}")
-        self.model = self.factory(self.settings.get("whisper_model", "small"), device=self.device,
+        name = model_path(self.settings.get("whisper_model", "small"), self.settings["models_dir"])
+        self.model = self.factory(name, device=self.device,
             compute_type=compute, cpu_threads=int(self.settings.get("threads", 4)),
             download_root=self.settings["models_dir"], local_files_only=True)
         self.emit("hardware", device=self.device, compute_type=compute,

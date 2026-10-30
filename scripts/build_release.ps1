@@ -1,4 +1,4 @@
-param([string]$Version = '0.3.0', [string]$MakeNsis = '')
+param([string]$Version = '0.3.1', [string]$MakeNsis = '')
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath (Split-Path $PSScriptRoot)
 $python = Join-Path (Get-Location) '.venv\Scripts\python.exe'
@@ -9,7 +9,7 @@ if (-not $MakeNsis) {
     else { $MakeNsis = Join-Path (Get-Location) 'local\release-tools\nsis\nsis-3.12\makensis.exe' }
 }
 if (-not (Test-Path -LiteralPath $MakeNsis)) { throw 'Install NSIS 3.12 and pass -MakeNsis <absolute path>' }
-& $python -m pytest -q
+& $python -m pytest -q --basetemp=local/pytest-build
 if ($LASTEXITCODE) { throw 'Tests failed' }
 & $python -m ruff check .
 if ($LASTEXITCODE) { throw 'Lint failed' }

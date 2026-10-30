@@ -15,6 +15,7 @@ from .downloads import download, extract_cuda
 from .media import NO_WINDOW, ROOT
 from .ollama import Ollama
 from .paths import cuda_folder, data_root
+from .whisper_models import prepare_whisper
 
 
 def external_process(args, **kwargs):
@@ -131,12 +132,8 @@ def prepare(settings, emit):
     else:
         emit("status", text="Whisper будет использовать CPU; библиотеки NVIDIA не требуются")
 
-    from faster_whisper.utils import download_model
     emit("status", text="Whisper small · загрузка недостающих файлов (около 0,5 ГБ)…", progress=0)
-    try:
-        download_model(settings.get("whisper_model", "small"), cache_dir=settings["models_dir"], local_files_only=True)
-    except (OSError, ValueError):
-        download_model(settings.get("whisper_model", "small"), cache_dir=settings["models_dir"])
+    prepare_whisper(settings.get("whisper_model", "small"), settings["models_dir"], emit)
     # Run actual encoder/decoder inference, not just a device-count check.
     import numpy as np
     engine = WhisperEngine(settings, emit)

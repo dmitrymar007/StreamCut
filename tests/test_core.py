@@ -190,7 +190,7 @@ def test_whisper_decoder_compatible(fixture_video):
 
 
 def test_visual_coverage_and_resume(fixture_video, tmp_path, monkeypatch, capsys):
-    from streamcut import worker
+    from streamcut import bootstrap, worker
     from streamcut.ollama import VisualProposals
     calls = []
     class LocalModel:
@@ -206,6 +206,7 @@ def test_visual_coverage_and_resume(fixture_video, tmp_path, monkeypatch, capsys
         def release(self, model):
             pass
     monkeypatch.setattr(worker, "Ollama", LocalModel)
+    monkeypatch.setattr(bootstrap, "start_ollama", lambda url: None)
     folder = tmp_path/"cache"
     folder.mkdir()
     snapshot = folder/"analysis.json"

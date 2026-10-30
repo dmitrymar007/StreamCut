@@ -2,6 +2,7 @@
 import hashlib
 import os
 import shutil
+import time
 import zipfile
 from pathlib import Path
 
@@ -16,7 +17,22 @@ def checksum(path):
     return digest.hexdigest()
 
 
-def download(asset, destination, progress=lambda done, total: None):
+def download(asset, destination, progress=lambda done, total: None, retry_status=lambda attempt, error: None):
+    for attempt in range(1, 4):
+        try:
+            return _download_once(asset, destination, progress)
+        except (httpx.TransportError, httpx.HTTPStatusError) as error:
+            if isinstance(error, httpx.HTTPStatusError) and error.response.status_code not in (408, 429) and (
+                error.response.status_code < 500
+            ):
+                raise
+            if attempt == 3:
+                raise
+            retry_status(attempt+1, error)
+            time.sleep(attempt)
+
+
+def _download_once(asset, destination, progress):
     target = Path(destination)
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.is_file() and checksum(target) == asset["sha256"]:
@@ -31,8 +47,9 @@ def download(asset, destination, progress=lambda done, total: None):
         partial.unlink()
         offset = 0
     if offset < size:
+        progress(offset, size)
         headers = {"Range": f"bytes={offset}-"} if offset else {}
-        with httpx.Client(follow_redirects=True, timeout=httpx.Timeout(90, connect=30), trust_env=False) as client:
+        with httpx.Client(follow_redirects=True, timeout=httpx.Timeout(30, connect=15), trust_env=False) as client:
             with client.stream("GET", asset["url"], headers=headers) as response:
                 response.raise_for_status()
                 if offset and response.status_code == 206:
@@ -42,7 +59,7 @@ def download(asset, destination, progress=lambda done, total: None):
                     offset = 0
                 with partial.open("ab" if offset else "wb") as output:
                     done = offset
-                    for block in response.iter_bytes(1024*1024):
+                    for block in response.iter_bytes(64*1024):
                         done += len(block)
                         if done > size:
                             raise ValueError("Размер загрузки отличается от закреплённого манифеста")

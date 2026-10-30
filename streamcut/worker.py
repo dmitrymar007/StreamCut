@@ -265,9 +265,8 @@ def main():
                             last_emit = time.monotonic()
             emit("done", text="Модель Ollama скачана")
         elif args.mode == "whisper":
-            from faster_whisper.utils import download_model
-            emit("status", text="Скачивание Whisper (прогресс в журнале загрузки)…")
-            download_model(args.value, cache_dir=args.folder)
+            from .whisper_models import prepare_whisper
+            prepare_whisper(args.value, args.folder, emit)
             emit("done", text="Whisper готов к офлайн-работе")
         elif args.mode == "test-text":
             client = Ollama(args.url)
